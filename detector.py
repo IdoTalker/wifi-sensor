@@ -5,8 +5,11 @@ flips a hysteresis-debounced motion flag when the score exceeds a threshold.
 An adaptive baseline slowly tracks environmental drift during clear periods.
 """
 
+import logging
 from collections import deque
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 CALIBRATION_SAMPLES = 30
@@ -32,8 +35,9 @@ class MotionDetector:
     consecutive anomalies to avoid single-sample false positives.
     """
 
-    def __init__(self, threshold: float = 2.0):
+    def __init__(self, threshold: float = 2.0, name: str = ""):
         self.threshold = threshold
+        self.name = name
         self._baseline_buf: list[float] = []
         self._window: deque[float] = deque(maxlen=WINDOW_SIZE)
         self._recent: deque[float] = deque(maxlen=VAR_WINDOW)
@@ -56,8 +60,8 @@ class MotionDetector:
         return min(len(self._baseline_buf), CALIBRATION_SAMPLES)
 
     def reset(self):
-        """Restart calibration, preserving the current threshold."""
-        self.__init__(threshold=self.threshold)
+        """Restart calibration, preserving the current threshold and name."""
+        self.__init__(threshold=self.threshold, name=self.name)
 
     def update(self, rssi: float) -> bool:
         """Feed one RSSI sample; return the current motion flag.
@@ -88,6 +92,10 @@ class MotionDetector:
                 ]
                 self._baseline_var_level = max(float(np.mean(rolling)), 0.2)
                 self._calibrated = True
+                logger.info(
+                    "calibrated %r  mean=%.1f  std=%.2f  var_level=%.3f",
+                    self.name, self._baseline_mean, self._baseline_std, self._baseline_var_level,
+                )
             return False
 
         # Mean-shift: how far is this sample from the quiet baseline?
@@ -108,8 +116,12 @@ class MotionDetector:
             self._stuck_ticks += 1
             # If stuck in motion for too long the environment has permanently changed; recalibrate
             if self._stuck_ticks >= STUCK_MOTION_TICKS:
+                logger.warning(
+                    "stuck-motion recal triggered on %r after %d ticks — resetting baseline",
+                    self.name, self._stuck_ticks,
+                )
                 saved = self.threshold
-                self.__init__(threshold=saved)
+                self.__init__(threshold=saved, name=self.name)
                 return False
         else:
             self._consecutive_anomalies = max(0, self._consecutive_anomalies - 1)

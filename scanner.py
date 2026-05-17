@@ -1,7 +1,10 @@
 """Windows Wi-Fi scanner — wraps `netsh wlan` to return a {ssid: rssi_dbm} snapshot."""
 
+import logging
 import subprocess
 import re
+
+logger = logging.getLogger(__name__)
 
 
 def scan_networks() -> dict[str, float]:
@@ -12,7 +15,11 @@ def scan_networks() -> dict[str, float]:
             capture_output=True, timeout=5
         )
         output = result.stdout.decode("utf-8", errors="replace") if result.stdout else ""
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except subprocess.TimeoutExpired:
+        logger.warning("netsh timed out — returning empty scan")
+        return {}
+    except FileNotFoundError:
+        logger.warning("netsh not found — is this a Windows machine with Wi-Fi?")
         return {}
 
     networks: dict[str, float] = {}
@@ -34,4 +41,5 @@ def scan_networks() -> dict[str, float]:
             dbm = (pct / 2) - 100  # netsh 0–100 % → dBm (Microsoft documented conversion)
             networks[f"{current_ssid} [{current_bssid}]"] = dbm
 
+    logger.debug("scan returned %d BSSIDs", len(networks))
     return networks

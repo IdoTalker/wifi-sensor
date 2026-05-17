@@ -7,9 +7,12 @@ persisted to rooms.json and auto-migrated from the legacy centroid-only format.
 """
 
 import json
+import logging
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 RECORD_SECONDS = 15
 SAVE_PATH = Path(__file__).parent / "rooms.json"
@@ -50,9 +53,12 @@ class Fingerprinter:
             self.rooms[name].sessions += 1
         else:
             self.rooms[name] = RoomFingerprint(name=name, sessions=1, samples=list(samples))
+        sessions = self.rooms[name].sessions
+        logger.info("recorded room %r  sessions=%d  total_samples=%d", name, sessions, len(self.rooms[name].samples))
         self._save()
 
     def delete(self, name: str):
+        logger.info("deleted room %r", name)
         self.rooms.pop(name, None)
         self._save()
 

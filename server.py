@@ -6,6 +6,8 @@ Any device on the local network can open http://<host>:5000 to monitor presence.
 """
 
 import json
+import logging
+import logging.handlers
 import threading
 import time
 from collections import deque
@@ -20,6 +22,24 @@ from classifier import classify as fft_classify, MIN_SAMPLES as FFT_MIN_SAMPLES
 from eventlog import log_event, load_recent
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
+LOG_PATH    = Path(__file__).parent / "wifi_sensor.log"
+
+# ── logging setup ─────────────────────────────────────────────────────────────
+
+def _setup_logging():
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    fh = logging.handlers.RotatingFileHandler(LOG_PATH, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(fmt)
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(fmt)
+    root.addHandler(fh)
+    root.addHandler(ch)
+
+logger = logging.getLogger(__name__)
 
 def _load_config() -> dict:
     try:
@@ -70,15 +90,20 @@ def _scan_loop():
     global _prev_state, _pending_state, _pending_count, _current_nets
 
     while True:
-        start = time.monotonic()
-        nets  = scan_networks()
+        try:
+            start = time.monotonic()
+            nets  = scan_networks()
+        except Exception:
+            logger.exception("unhandled error in scan_networks()")
+            time.sleep(1.0)
+            continue
 
         with _lock:
             _current_nets = nets
 
             for ssid in nets:
                 if ssid not in _detectors:
-                    _detectors[ssid] = MotionDetector(threshold=_threshold)
+                    _detectors[ssid] = MotionDetector(threshold=_threshold, name=ssid)
 
             scored_pairs: list[tuple[float, float]] = []
             for ssid, rssi in nets.items():
@@ -238,11 +263,22 @@ def api_threshold():
 @app.route("/api/recalibrate", methods=["POST"])
 def api_recalibrate():
     """Reset all detectors and clear score history so calibration restarts."""
+    logger.info("manual recalibrate triggered via API")
     with _lock:
         for det in _detectors.values():
             det.reset()
         _score_history.clear()
     return jsonify({"ok": True})
+
+@app.route("/api/logs")
+def api_logs():
+    """Return the last N lines of wifi_sensor.log as plain text."""
+    n = min(int(request.args.get("n", 100)), 500)
+    try:
+        lines = LOG_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
+        return "\n".join(lines[-n:]), 200, {"Content-Type": "text/plain; charset=utf-8"}
+    except FileNotFoundError:
+        return "Log file not found — run the server first.", 404, {"Content-Type": "text/plain"}
 
 # ── Dashboard HTML ────────────────────────────────────────────────────────────
 
@@ -361,6 +397,14 @@ header h1{font-size:1.05em;color:#89b4fa;font-weight:600}
 <div class="card chart-card" style="margin-top:10px">
   <h3>Anomaly Score</h3>
   <canvas id="score-chart"></canvas>
+</div>
+
+<div class="card" style="margin-top:10px">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+    <h3 style="margin:0">Debug Log</h3>
+    <a href="/api/logs?n=500" target="_blank" style="color:#585b70;font-size:.78em;text-decoration:none">open full log ↗</a>
+  </div>
+  <pre id="log-panel" style="background:#181825;color:#a6adc8;font-size:.72em;padding:8px;border-radius:4px;max-height:180px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;margin:0"></pre>
 </div>
 
 <script>
@@ -511,6 +555,17 @@ async function recalibrate(){
 
 setInterval(refresh,1000);
 refresh();
+
+async function refreshLogs(){
+  try{
+    const text = await (await fetch('/api/logs?n=40')).text();
+    const el = document.getElementById('log-panel');
+    el.textContent = text;
+    el.scrollTop = el.scrollHeight;
+  }catch(e){}
+}
+setInterval(refreshLogs, 5000);
+refreshLogs();
 </script>
 </body>
 </html>"""
@@ -520,6 +575,8 @@ refresh();
 if __name__ == "__main__":
     import socket
     import webbrowser
+    _setup_logging()
+    logger.info("server starting  log=%s", LOG_PATH)
     try:
         ip = socket.gethostbyname(socket.gethostname())
     except Exception:

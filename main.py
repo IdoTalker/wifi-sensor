@@ -5,11 +5,14 @@ Displays per-network anomaly scores, a live score chart, FFT band indicators,
 room-fingerprint chips, a 3-state status bar, and a recent-event log.
 """
 
+import logging
+import logging.handlers
 import threading
 import time
 import tkinter as tk
 from tkinter import ttk, simpledialog
 from collections import deque
+from pathlib import Path
 
 import matplotlib
 matplotlib.use("TkAgg")
@@ -297,7 +300,7 @@ class App(tk.Tk):
                 self._networks = nets
                 for ssid in nets:
                     if ssid not in self._detectors:
-                        self._detectors[ssid] = MotionDetector(threshold=self._threshold_var.get())
+                        self._detectors[ssid] = MotionDetector(threshold=self._threshold_var.get(), name=ssid)
 
                 # Update motion detectors
                 scored_pairs: list[tuple[float, float]] = []
@@ -494,5 +497,14 @@ class App(tk.Tk):
 
 
 if __name__ == "__main__":
+    _log_path = Path(__file__).parent / "wifi_sensor.log"
+    _root_log = logging.getLogger()
+    _root_log.setLevel(logging.DEBUG)
+    _fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    _fh = logging.handlers.RotatingFileHandler(_log_path, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+    _fh.setLevel(logging.DEBUG)
+    _fh.setFormatter(_fmt)
+    _root_log.addHandler(_fh)
+    logging.getLogger(__name__).info("desktop app starting  log=%s", _log_path)
     app = App()
     app.mainloop()
