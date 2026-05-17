@@ -1,3 +1,10 @@
+"""Flask web dashboard — headless alternative to main.py.
+
+Runs the same detection pipeline as the Tkinter app in a background thread
+and exposes a JSON API + a self-contained single-page HTML dashboard.
+Any device on the local network can open http://<host>:5000 to monitor presence.
+"""
+
 import threading
 import time
 from collections import deque
@@ -44,6 +51,7 @@ _pending_count = 0
 # ── background scan loop ──────────────────────────────────────────────────────
 
 def _scan_loop():
+    """Background thread: scan networks at 1 Hz, run detection pipeline, update shared state."""
     global _location, _recording, _record_name, _record_buf, _record_remaining
     global _act_state, _b_frac, _m_frac
     global _prev_state, _pending_state, _pending_count, _current_nets
@@ -114,10 +122,12 @@ app = Flask(__name__)
 
 @app.route("/")
 def index():
+    """Serve the self-contained single-page dashboard."""
     return DASHBOARD_HTML, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 @app.route("/api/status")
 def api_status():
+    """Return a full JSON snapshot of detector state, networks, rooms, and recent events."""
     with _lock:
         all_cal = bool(_detectors) and all(d.calibrated for d in _detectors.values())
 
@@ -174,6 +184,7 @@ def api_status():
 
 @app.route("/api/record", methods=["POST"])
 def api_record():
+    """Start a 15-second room-fingerprint recording session. Body: {"name": "<room>"}."""
     global _recording, _record_name, _record_buf, _record_remaining
     name = (request.json or {}).get("name", "").strip()
     if not name:
@@ -189,11 +200,13 @@ def api_record():
 
 @app.route("/api/rooms/<name>", methods=["DELETE"])
 def api_delete_room(name):
+    """Delete a stored room fingerprint by name."""
     _fingerprinter.delete(name)
     return jsonify({"ok": True})
 
 @app.route("/api/threshold", methods=["POST"])
 def api_threshold():
+    """Update the anomaly threshold (0.5–5.0). Body: {"value": <float>}."""
     global _threshold
     val = (request.json or {}).get("value")
     if val is None:
@@ -206,6 +219,7 @@ def api_threshold():
 
 @app.route("/api/recalibrate", methods=["POST"])
 def api_recalibrate():
+    """Reset all detectors and clear score history so calibration restarts."""
     with _lock:
         for det in _detectors.values():
             det.reset()

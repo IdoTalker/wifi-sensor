@@ -1,3 +1,11 @@
+"""KNN room fingerprinter — maps a live RSSI snapshot to a named location.
+
+Each room accumulates one or more 15-second recording sessions.  Classification
+uses penalised Euclidean distance over the common network subset so rooms
+recorded with different visible APs still compare meaningfully.  State is
+persisted to rooms.json and auto-migrated from the legacy centroid-only format.
+"""
+
 import json
 import math
 from dataclasses import dataclass, field
@@ -91,6 +99,7 @@ class Fingerprinter:
     # ── persistence ───────────────────────────────────────────────────────────
 
     def _save(self):
+        """Serialise all rooms (with their raw sample lists) to rooms.json."""
         data = {
             name: {"sessions": fp.sessions, "samples": fp.samples}
             for name, fp in self.rooms.items()
@@ -98,6 +107,7 @@ class Fingerprinter:
         SAVE_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     def _load(self):
+        """Deserialise rooms.json, migrating the old centroid-only format if needed."""
         if not SAVE_PATH.exists():
             return
         try:

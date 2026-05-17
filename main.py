@@ -1,3 +1,10 @@
+"""Tkinter desktop GUI for the Wi-Fi presence detector.
+
+Runs a background scan thread (1 Hz) and refreshes the UI every 500 ms.
+Displays per-network anomaly scores, a live score chart, FFT band indicators,
+room-fingerprint chips, a 3-state status bar, and a recent-event log.
+"""
+
 import threading
 import time
 import tkinter as tk
@@ -31,6 +38,14 @@ MUTED  = "#585b70"
 
 
 class App(tk.Tk):
+    """Main application window.
+
+    Owns a background daemon thread (_scan_loop) that polls Wi-Fi every second
+    and updates shared state under _lock.  The main thread drives the UI at
+    500 ms via self.after() calls and never touches shared state without
+    acquiring _lock first.
+    """
+
     def __init__(self):
         super().__init__()
         self.title("Wi-Fi Presence Detector")
@@ -177,6 +192,7 @@ class App(tk.Tk):
             self._event_rows.append(lbl)
 
     def _ensure_net_rows(self, ssids: list[str]):
+        """Add or remove per-network rows in the network panel to match ssids."""
         existing = set(self._net_rows.keys())
         current = set(ssids)
         for ssid in existing - current:
@@ -199,6 +215,7 @@ class App(tk.Tk):
             self._net_rows[ssid] = {"dot": dot, "score": score_lbl, "status": status_lbl}
 
     def _rebuild_chips(self, rooms: dict):
+        """Rebuild the room chips strip from the current Fingerprinter.rooms dict."""
         for widget in self._chips_frame.winfo_children():
             widget.destroy()
         if not rooms:
@@ -271,6 +288,7 @@ class App(tk.Tk):
     # ── background scan loop ─────────────────────────────────────────────────
 
     def _scan_loop(self):
+        """Background thread: scan networks, update detectors, handle recording/classification."""
         while self._running:
             start = time.monotonic()
             nets = scan_networks()
@@ -310,6 +328,11 @@ class App(tk.Tk):
     # ── UI refresh (main thread) ──────────────────────────────────────────────
 
     def _update_ui(self):
+        """UI refresh callback (main thread, 500 ms cadence).
+
+        Snapshots shared state under _lock, then updates all widgets.
+        Re-schedules itself via self.after() so it never blocks the event loop.
+        """
         if not self._running:
             return
 

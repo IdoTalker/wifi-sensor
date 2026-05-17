@@ -1,3 +1,9 @@
+"""FFT-based 3-state activity classifier operating on fused anomaly score history.
+
+Classifies a rolling window of per-second scores into empty / present / moving
+by comparing spectral power in the breathing band vs the motion band.
+"""
+
 import numpy as np
 
 # With 1 Hz sampling, Nyquist = 0.5 Hz. Walking (1-2 Hz) aliases into our

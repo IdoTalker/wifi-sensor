@@ -1,3 +1,10 @@
+"""Per-network motion detector using mean-shift and rolling-variance Z-scores.
+
+After a quiet calibration period it scores each incoming RSSI sample and
+flips a hysteresis-debounced motion flag when the score exceeds a threshold.
+An adaptive baseline slowly tracks environmental drift during clear periods.
+"""
+
 from collections import deque
 import numpy as np
 
@@ -10,6 +17,19 @@ ADAPT_RATE = 0.015    # EMA rate for slow baseline drift during clear periods
 
 
 class MotionDetector:
+    """Single-network anomaly detector with two-stage scoring and hysteresis.
+
+    Phase 1 — calibration: collects CALIBRATION_SAMPLES quiet readings to
+    establish a baseline mean, std, and typical rolling variance level.
+
+    Phase 2 — detection: scores each new RSSI value as
+        score = max(z_mean, z_var)
+    where z_mean is the mean-shift normalised by baseline std, and z_var is
+    the ratio of current rolling std to the baseline jitter level (minus 1 so
+    normal jitter contributes ~0).  The motion flag flips via HYSTERESIS
+    consecutive anomalies to avoid single-sample false positives.
+    """
+
     def __init__(self, threshold: float = 2.0):
         self.threshold = threshold
         self._baseline_buf: list[float] = []
@@ -32,9 +52,16 @@ class MotionDetector:
         return min(len(self._baseline_buf), CALIBRATION_SAMPLES)
 
     def reset(self):
+        """Restart calibration, preserving the current threshold."""
         self.__init__(threshold=self.threshold)
 
     def update(self, rssi: float) -> bool:
+        """Feed one RSSI sample; return the current motion flag.
+
+        During calibration returns False.  After calibration updates the score,
+        manages the hysteresis counter, and slowly adapts the baseline during
+        clear periods.
+        """
         self._window.append(rssi)
         self._recent.append(rssi)
 
@@ -81,10 +108,13 @@ class MotionDetector:
         return self._motion
 
     def is_motion(self) -> bool:
+        """Return the current debounced motion flag."""
         return self._motion
 
     def score(self) -> float:
+        """Return the most recent anomaly score (0 during calibration)."""
         return self._score
 
     def history(self) -> list[float]:
+        """Return up to WINDOW_SIZE recent RSSI readings, oldest first."""
         return list(self._window)
