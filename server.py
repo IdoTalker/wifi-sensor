@@ -330,11 +330,13 @@ header h1{font-size:1.05em;color:#89b4fa;font-weight:600}
 @media(max-width:560px){.grid2{grid-template-columns:1fr}}
 .card{background:#313244;border-radius:8px;padding:12px}
 .card h3{font-size:.68em;color:#585b70;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px}
-.net-row{display:flex;align-items:center;gap:8px;padding:3px 4px;font-size:.84em;cursor:pointer;border-radius:4px;border-left:3px solid transparent}
+.net-row{display:flex;align-items:center;gap:8px;padding:3px 4px;font-size:.84em;cursor:pointer;border-radius:4px;border-left:3px solid transparent;min-height:40px;touch-action:manipulation}
 .net-row:hover{background:#45475a}
 .net-row.focused{background:#1e1e2e;border-left:3px solid #cba6f7}
 .net-row.dim{opacity:0.35}
 .net-ssid{flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.net-score{color:#585b70;white-space:nowrap}
+.net-status{width:80px;text-align:right;font-weight:bold;white-space:nowrap}
 .bar-row{display:flex;align-items:center;gap:8px;margin:5px 0;font-size:.82em}
 .bar-label{width:80px;color:#585b70}
 .bar-track{flex:1;background:#181825;border-radius:4px;height:6px}
@@ -360,7 +362,7 @@ header h1{font-size:1.05em;color:#89b4fa;font-weight:600}
 .sens-row input[type=range]{flex:1;accent-color:#89b4fa}
 .action-row{display:flex;gap:8px;margin-top:8px}
 .chart-card canvas{max-height:180px}
-@media(max-width:460px){.grid2{grid-template-columns:1fr}.record-row{flex-direction:column}.record-row input,.record-row .btn{width:100%}.chart-card canvas{max-height:140px}}
+@media(max-width:460px){body{padding:10px}.grid2{grid-template-columns:1fr}.record-row{flex-direction:column}.record-row input,.record-row .btn{width:100%}.chart-card canvas{max-height:140px}.net-score{display:none}.net-status{width:auto;min-width:48px;font-size:.76em}.bar-label{width:60px}.sens-high,.sens-low{display:none}}
 </style>
 </head>
 <body>
@@ -398,9 +400,9 @@ header h1{font-size:1.05em;color:#89b4fa;font-weight:600}
     </div>
     <div class="sens-row">
       <label>Sensitivity</label>
-      <span class="muted">High</span>
+      <span class="muted sens-high">High</span>
       <input type="range" id="threshold" min="0.5" max="5" step="0.1" value="2.0" oninput="setThreshold(this.value)">
-      <span class="muted">Low</span>
+      <span class="muted sens-low">Low</span>
       <span id="thresh-val" style="color:#89b4fa;width:28px">2.0</span>
     </div>
     <div class="action-row">
@@ -520,8 +522,8 @@ async function refresh(){
       return `<div class="${cls}" onclick="toggleFocus('${safe}')">
         <span style="color:${isFocused?'#cba6f7':dc}">●</span>
         <span class="net-ssid">${n.ssid}</span>
-        <span style="color:#585b70">${n.score.toFixed(2)}</span>
-        <span style="color:${sc};font-weight:bold;width:80px;text-align:right">${st}</span>
+        <span class="net-score">${n.score.toFixed(2)}</span>
+        <span class="net-status" style="color:${sc}">${st}</span>
       </div>`;
     }).join('')||'<span class="muted">No networks found.</span>';
 
