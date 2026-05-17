@@ -53,6 +53,7 @@ def _save_config(data: dict):
 POLL_INTERVAL = 1.0
 SCORE_HISTORY  = 300  # 5-minute buffer gives FFT resolution of ~0.003 Hz
 DEBOUNCE_TICKS = 3   # seconds at 1 Hz
+STALE_ABSENT_TICKS = 30  # consecutive absent scans before dropping an uncalibrated detector
 
 # ── shared state ──────────────────────────────────────────────────────────────
 
@@ -62,6 +63,7 @@ _detectors:    dict[str, MotionDetector] = {}
 _current_nets: dict[str, float]          = {}
 _net_scores:   dict[str, float]          = {}
 _net_motion:   dict[str, bool]           = {}
+_net_absent:   dict[str, int]            = {}
 _score_history: deque[float]             = deque(maxlen=SCORE_HISTORY)
 
 _fingerprinter = Fingerprinter()
@@ -118,6 +120,17 @@ def _scan_loop():
                 total_w = sum(w for _, w in scored_pairs)
                 fused = sum(s * w for s, w in scored_pairs) / total_w
                 _score_history.append(fused)
+
+            # Prune uncalibrated detectors absent for too long
+            for key in list(_detectors.keys()):
+                if key in nets:
+                    _net_absent[key] = 0
+                else:
+                    _net_absent[key] = _net_absent.get(key, 0) + 1
+                    if _net_absent[key] >= STALE_ABSENT_TICKS and not _detectors[key].calibrated:
+                        logger.info("pruning stale uncalibrated detector %r (absent %d scans)", key, _net_absent[key])
+                        del _detectors[key]
+                        del _net_absent[key]
 
             if _recording:
                 _record_buf.append(dict(nets))

@@ -27,6 +27,7 @@ from eventlog import log_event, load_recent
 
 POLL_INTERVAL = 1.0
 SCORE_HISTORY = 300  # 5-minute buffer gives FFT resolution of ~0.003 Hz
+STALE_ABSENT_TICKS = 30  # consecutive absent scans before dropping an uncalibrated detector
 
 BG     = "#1e1e2e"
 BG2    = "#181825"
@@ -64,6 +65,7 @@ class App(tk.Tk):
         self._networks: dict[str, float] = {}
         self._net_scores: dict[str, float] = {}
         self._net_motion: dict[str, bool] = {}
+        self._net_absent: dict[str, int] = {}
         self._score_history: deque[float] = deque(maxlen=SCORE_HISTORY)
 
         # Room fingerprinting
@@ -317,6 +319,17 @@ class App(tk.Tk):
                     fused = sum(s * w for s, w in scored_pairs) / total_w
                     self._score_history.append(fused)
 
+                # Prune uncalibrated detectors absent for too long
+                for key in list(self._detectors.keys()):
+                    if key in nets:
+                        self._net_absent[key] = 0
+                    else:
+                        self._net_absent[key] = self._net_absent.get(key, 0) + 1
+                        if (self._net_absent[key] >= STALE_ABSENT_TICKS
+                                and not self._detectors[key].calibrated):
+                            del self._detectors[key]
+                            del self._net_absent[key]
+
                 # Recording or classifying
                 if self._recording:
                     self._record_buf.append(dict(nets))
@@ -353,6 +366,9 @@ class App(tk.Tk):
             location = self._location
             if rooms_dirty:
                 self._rooms_dirty = False
+
+        # Keep network rows in sync with current detectors (removes pruned entries)
+        self._ensure_net_rows(sorted(detectors.keys()))
 
         # ── rooms panel ──
         if rooms_dirty:
