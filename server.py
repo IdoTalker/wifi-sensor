@@ -64,6 +64,7 @@ _current_nets: dict[str, float]          = {}
 _net_scores:   dict[str, float]          = {}
 _net_motion:   dict[str, bool]           = {}
 _net_absent:   dict[str, int]            = {}
+_focused_ssid: str | None               = None
 _score_history: deque[float]             = deque(maxlen=SCORE_HISTORY)
 
 _fingerprinter = Fingerprinter()
@@ -107,7 +108,7 @@ def _scan_loop():
                 if ssid not in _detectors:
                     _detectors[ssid] = MotionDetector(threshold=_threshold, name=ssid)
 
-            scored_pairs: list[tuple[float, float]] = []
+            scored_pairs: list[tuple[str, float, float]] = []  # (key, score, weight)
             for ssid, rssi in nets.items():
                 det = _detectors[ssid]
                 det.update(rssi)
@@ -115,10 +116,12 @@ def _scan_loop():
                 _net_motion[ssid] = det.is_motion()
                 if det.calibrated:
                     weight = max(rssi + 100.0, 1.0)  # stronger signal → more weight
-                    scored_pairs.append((det.score(), weight))
-            if scored_pairs:
-                total_w = sum(w for _, w in scored_pairs)
-                fused = sum(s * w for s, w in scored_pairs) / total_w
+                    scored_pairs.append((ssid, det.score(), weight))
+            active = [(s, w) for k, s, w in scored_pairs
+                      if _focused_ssid is None or k == _focused_ssid]
+            if active:
+                total_w = sum(w for _, w in active)
+                fused = sum(s * w for s, w in active) / total_w
                 _score_history.append(fused)
 
             # Prune uncalibrated detectors absent for too long
@@ -233,6 +236,7 @@ def api_status():
             "record_remaining": _record_remaining,
             "rooms":            rooms,
             "threshold":        _threshold,
+            "focused_ssid":     _focused_ssid,
             "score_history":    list(_score_history),
             "events":           load_recent(10),
         })
@@ -283,6 +287,15 @@ def api_recalibrate():
         _score_history.clear()
     return jsonify({"ok": True})
 
+@app.route("/api/focus", methods=["POST"])
+def api_focus():
+    """Set or clear the focused SSID. Body: {"ssid": "<key>"} or {"ssid": null}."""
+    global _focused_ssid
+    ssid = (request.json or {}).get("ssid")
+    _focused_ssid = ssid if ssid else None
+    logger.info("focus set to %r", _focused_ssid)
+    return jsonify({"ok": True, "focused_ssid": _focused_ssid})
+
 @app.route("/api/logs")
 def api_logs():
     """Return the last N lines of wifi_sensor.log as plain text."""
@@ -317,7 +330,10 @@ header h1{font-size:1.05em;color:#89b4fa;font-weight:600}
 @media(max-width:560px){.grid2{grid-template-columns:1fr}}
 .card{background:#313244;border-radius:8px;padding:12px}
 .card h3{font-size:.68em;color:#585b70;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px}
-.net-row{display:flex;align-items:center;gap:8px;padding:2px 0;font-size:.84em}
+.net-row{display:flex;align-items:center;gap:8px;padding:3px 4px;font-size:.84em;cursor:pointer;border-radius:4px;border-left:3px solid transparent}
+.net-row:hover{background:#45475a}
+.net-row.focused{background:#1e1e2e;border-left:3px solid #cba6f7}
+.net-row.dim{opacity:0.35}
 .net-ssid{flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .bar-row{display:flex;align-items:center;gap:8px;margin:5px 0;font-size:.82em}
 .bar-label{width:80px;color:#585b70}
@@ -428,6 +444,14 @@ const STATE_LABEL = {
 };
 
 let thresholdPending = null;
+let focusedSsid = null;
+
+async function toggleFocus(ssid){
+  const newFocus = (focusedSsid === ssid) ? null : ssid;
+  await fetch('/api/focus', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ssid: newFocus})});
+  focusedSsid = newFocus;
+}
 
 const _scoreChart = new Chart(document.getElementById('score-chart').getContext('2d'), {
   type:'line',
@@ -486,11 +510,15 @@ async function refresh(){
 
     // Networks
     document.getElementById('networks').innerHTML = d.networks.map(n=>{
+      const isFocused = d.focused_ssid === n.ssid;
+      const isDimmed  = d.focused_ssid && !isFocused;
+      const cls = isFocused ? 'net-row focused' : isDimmed ? 'net-row dim' : 'net-row';
       const dc = n.calibrated?(n.motion?'#f38ba8':'#a6e3a1'):'#585b70';
-      const sc = n.calibrated?(n.motion?'#f38ba8':'#a6e3a1'):'#585b70';
-      const st = n.calibrated?(n.motion?'MOTION':'clear'):'cal '+n.cal_progress+'/30';
-      return `<div class="net-row">
-        <span style="color:${dc}">●</span>
+      const sc = isFocused?'#cba6f7':n.calibrated?(n.motion?'#f38ba8':'#a6e3a1'):'#585b70';
+      const st = !n.calibrated?'cal '+n.cal_progress+'/30':isFocused?'FOCUSED':n.motion?'MOTION':'clear';
+      const safe = n.ssid.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+      return `<div class="${cls}" onclick="toggleFocus('${safe}')">
+        <span style="color:${isFocused?'#cba6f7':dc}">●</span>
         <span class="net-ssid">${n.ssid}</span>
         <span style="color:#585b70">${n.score.toFixed(2)}</span>
         <span style="color:${sc};font-weight:bold;width:80px;text-align:right">${st}</span>
@@ -505,6 +533,9 @@ async function refresh(){
       document.getElementById('bar-m').style.width=m+'%';
       document.getElementById('pct-m').textContent=m+'%';
     }
+
+    // Sync focus state
+    focusedSsid = d.focused_ssid || null;
 
     // Threshold slider sync (don't override if user is dragging)
     if(thresholdPending===null){

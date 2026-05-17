@@ -66,6 +66,7 @@ class App(tk.Tk):
         self._net_scores: dict[str, float] = {}
         self._net_motion: dict[str, bool] = {}
         self._net_absent: dict[str, int] = {}
+        self._focused_ssid: str | None = None
         self._score_history: deque[float] = deque(maxlen=SCORE_HISTORY)
 
         # Room fingerprinting
@@ -205,7 +206,7 @@ class App(tk.Tk):
                 w.destroy()
             del self._net_rows[ssid]
         for ssid in current - existing:
-            row = tk.Frame(self._net_frame, bg=PANEL)
+            row = tk.Frame(self._net_frame, bg=PANEL, cursor="hand2")
             row.pack(fill="x", padx=8, pady=1)
             dot = tk.Label(row, text="●", bg=PANEL, fg=MUTED, font=("Segoe UI", 10))
             dot.pack(side="left")
@@ -217,7 +218,9 @@ class App(tk.Tk):
             status_lbl = tk.Label(row, text="calibrating", bg=PANEL, fg=ORANGE,
                                   font=("Segoe UI", 9, "bold"), width=14, anchor="w")
             status_lbl.pack(side="left")
-            self._net_rows[ssid] = {"dot": dot, "score": score_lbl, "status": status_lbl}
+            for widget in row.winfo_children() + [row]:
+                widget.bind("<Button-1>", lambda e, s=ssid: self._toggle_focus(s))
+            self._net_rows[ssid] = {"row": row, "dot": dot, "score": score_lbl, "status": status_lbl}
 
     def _rebuild_chips(self, rooms: dict):
         """Rebuild the room chips strip from the current Fingerprinter.rooms dict."""
@@ -240,6 +243,10 @@ class App(tk.Tk):
                       command=lambda n=name: self._delete_room(n)).pack(side="left")
 
     # ── actions ──────────────────────────────────────────────────────────────
+
+    def _toggle_focus(self, ssid: str):
+        with self._lock:
+            self._focused_ssid = None if self._focused_ssid == ssid else ssid
 
     def _on_threshold_change(self, _=None):
         val = round(self._threshold_var.get(), 1)
@@ -305,7 +312,7 @@ class App(tk.Tk):
                         self._detectors[ssid] = MotionDetector(threshold=self._threshold_var.get(), name=ssid)
 
                 # Update motion detectors
-                scored_pairs: list[tuple[float, float]] = []
+                scored_pairs: list[tuple[str, float, float]] = []  # (key, score, weight)
                 for ssid, rssi in nets.items():
                     det = self._detectors[ssid]
                     det.update(rssi)
@@ -313,10 +320,12 @@ class App(tk.Tk):
                     self._net_motion[ssid] = det.is_motion()
                     if det.calibrated:
                         weight = max(rssi + 100.0, 1.0)  # stronger signal → more weight
-                        scored_pairs.append((det.score(), weight))
-                if scored_pairs:
-                    total_w = sum(w for _, w in scored_pairs)
-                    fused = sum(s * w for s, w in scored_pairs) / total_w
+                        scored_pairs.append((ssid, det.score(), weight))
+                active = [(s, w) for k, s, w in scored_pairs
+                          if self._focused_ssid is None or k == self._focused_ssid]
+                if active:
+                    total_w = sum(w for _, w in active)
+                    fused = sum(s * w for s, w in active) / total_w
                     self._score_history.append(fused)
 
                 # Prune uncalibrated detectors absent for too long
@@ -364,6 +373,7 @@ class App(tk.Tk):
             record_remaining = self._record_remaining
             rooms_dirty = self._rooms_dirty
             location = self._location
+            focused_ssid = self._focused_ssid
             if rooms_dirty:
                 self._rooms_dirty = False
 
@@ -455,19 +465,29 @@ class App(tk.Tk):
                 continue
             score = net_scores.get(ssid, 0.0)
             motion = net_motion.get(ssid, False)
+            is_focused = focused_ssid == ssid
+            is_dimmed  = bool(focused_ssid) and not is_focused
+            row_bg = "#2a2a3e" if is_focused else PANEL
+            widgets["row"].configure(bg=row_bg)
+            for w in (widgets["dot"], widgets["score"], widgets["status"]):
+                w.configure(bg=row_bg)
             if not det.calibrated:
                 prog = det.calibration_progress
                 widgets["dot"].configure(fg=MUTED)
-                widgets["score"].configure(text=f"cal {prog}/{CALIBRATION_SAMPLES}", fg=MUTED)
+                widgets["score"].configure(text=f"cal {prog}/{CALIBRATION_SAMPLES}", fg=MUTED if not is_focused else FG)
                 widgets["status"].configure(text="calibrating", fg=ORANGE)
+            elif is_focused:
+                widgets["dot"].configure(fg=PURPLE)
+                widgets["score"].configure(text=f"score: {score:.2f}", fg=FG)
+                widgets["status"].configure(text="FOCUSED", fg=PURPLE)
             elif motion:
-                widgets["dot"].configure(fg=RED)
-                widgets["score"].configure(text=f"score: {score:.2f}", fg=FG)
-                widgets["status"].configure(text="MOTION", fg=RED)
+                widgets["dot"].configure(fg=MUTED if is_dimmed else RED)
+                widgets["score"].configure(text=f"score: {score:.2f}", fg=MUTED if is_dimmed else FG)
+                widgets["status"].configure(text="MOTION", fg=MUTED if is_dimmed else RED)
             else:
-                widgets["dot"].configure(fg=GREEN)
-                widgets["score"].configure(text=f"score: {score:.2f}", fg=FG)
-                widgets["status"].configure(text="clear", fg=GREEN)
+                widgets["dot"].configure(fg=MUTED if is_dimmed else GREEN)
+                widgets["score"].configure(text=f"score: {score:.2f}", fg=MUTED if is_dimmed else FG)
+                widgets["status"].configure(text="clear", fg=MUTED if is_dimmed else GREEN)
 
         # ── status bar (3-state classifier) ──
         AMBER = "#f9e2af"
