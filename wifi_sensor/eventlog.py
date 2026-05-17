@@ -8,7 +8,7 @@ import csv
 import datetime
 from pathlib import Path
 
-LOG_PATH = Path(__file__).parent / "events.csv"
+LOG_PATH = Path(__file__).parent.parent / "events.csv"
 _HEADER = ["timestamp", "state", "room", "confidence"]
 
 

@@ -47,8 +47,10 @@ def classify(scores: list[float], threshold: float) -> tuple[str, float, float]:
     b_frac = band_fraction(*BREATHING_BAND)
     m_frac = band_fraction(*MOTION_BAND)
 
-    # Adaptive empty threshold: raise bar in noisy environments
-    empty_thresh = max(noise_floor * 2.0, threshold * EMPTY_FACTOR)
+    # Use a fixed fraction of the detection threshold.  The earlier adaptive
+    # formula (noise_floor * 2) raised the bar too high when the signal was
+    # consistently elevated, misclassifying genuine motion as "empty".
+    empty_thresh = threshold * EMPTY_FACTOR
     if recent_mean < empty_thresh:
         state = "empty"
     elif m_frac >= b_frac:

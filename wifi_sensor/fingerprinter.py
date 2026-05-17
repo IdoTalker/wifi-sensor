@@ -15,7 +15,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 RECORD_SECONDS = 15
-SAVE_PATH = Path(__file__).parent / "rooms.json"
+SAVE_PATH = Path(__file__).parent.parent / "rooms.json"
 
 K = 5                    # neighbours to vote on
 MIN_CONFIDENCE = 0.45    # below this the classifier abstains ("Unknown")

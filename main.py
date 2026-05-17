@@ -19,11 +19,11 @@ matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
-from scanner import scan_networks
-from detector import MotionDetector, CALIBRATION_SAMPLES, WINDOW_SIZE
-from fingerprinter import Fingerprinter, RECORD_SECONDS
-from classifier import classify as fft_classify, MIN_SAMPLES as FFT_MIN_SAMPLES
-from eventlog import log_event, load_recent
+from wifi_sensor.scanner import scan_networks
+from wifi_sensor.detector import MotionDetector, CALIBRATION_SAMPLES, WINDOW_SIZE
+from wifi_sensor.fingerprinter import Fingerprinter, RECORD_SECONDS
+from wifi_sensor.classifier import classify as fft_classify, MIN_SAMPLES as FFT_MIN_SAMPLES
+from wifi_sensor.eventlog import log_event, load_recent
 
 POLL_INTERVAL = 1.0
 SCORE_HISTORY = 300  # 5-minute buffer gives FFT resolution of ~0.003 Hz

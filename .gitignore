@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 events.csv
 rooms.json
+.env
+scan_suggestions.json
+wifi_sensor.log
+map.json

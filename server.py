@@ -13,16 +13,21 @@ import time
 from collections import deque
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from flask import Flask, jsonify, request
 
-from scanner import scan_networks
-from detector import MotionDetector, CALIBRATION_SAMPLES
-from fingerprinter import Fingerprinter, RECORD_SECONDS
-from classifier import classify as fft_classify, MIN_SAMPLES as FFT_MIN_SAMPLES
-from eventlog import log_event, load_recent
+from wifi_sensor.scanner import scan_networks
+from wifi_sensor.detector import MotionDetector, CALIBRATION_SAMPLES
+from wifi_sensor.fingerprinter import Fingerprinter, RECORD_SECONDS
+from wifi_sensor.classifier import classify as fft_classify, MIN_SAMPLES as FFT_MIN_SAMPLES
+from wifi_sensor.eventlog import log_event, load_recent
+from wifi_sensor.log_scanner import scan as _scan_log, LOG_SCAN_THRESHOLD_BYTES, SUGGESTIONS_PATH
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
 LOG_PATH    = Path(__file__).parent / "wifi_sensor.log"
+MAP_PATH    = Path(__file__).parent / "map.json"
 
 # ── logging setup ─────────────────────────────────────────────────────────────
 
@@ -172,6 +177,28 @@ def _scan_loop():
             logger.exception("unhandled error in scan loop — restarting iteration")
             time.sleep(1.0)
 
+# ── log-watcher thread ────────────────────────────────────────────────────────
+
+def _log_watcher():
+    """Background thread: scan the log whenever it grows by LOG_SCAN_THRESHOLD_BYTES."""
+    last_scanned_size: int = 0
+    while True:
+        time.sleep(30)
+        try:
+            size = LOG_PATH.stat().st_size if LOG_PATH.exists() else 0
+            if size < last_scanned_size:  # log was rotated — scan the archived tail first
+                old_log = LOG_PATH.with_suffix(".log.1")
+                if old_log.exists():
+                    logger.info("log_watcher: rotation detected — scanning archived %s", old_log.name)
+                    _scan_log(old_log, last_scanned_size)
+                last_scanned_size = 0
+            if size - last_scanned_size >= LOG_SCAN_THRESHOLD_BYTES:
+                logger.info("log_watcher: log grew to %.1f KB — triggering scan", size / 1024)
+                _scan_log(LOG_PATH, size)
+                last_scanned_size = size
+        except Exception:
+            logger.exception("log_watcher: unexpected error")
+
 # ── Flask app ─────────────────────────────────────────────────────────────────
 
 app = Flask(__name__)
@@ -179,7 +206,10 @@ app = Flask(__name__)
 @app.route("/")
 def index():
     """Serve the self-contained single-page dashboard."""
-    return DASHBOARD_HTML, 200, {"Content-Type": "text/html; charset=utf-8"}
+    return DASHBOARD_HTML, 200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+    }
 
 @app.route("/api/status")
 def api_status():
@@ -276,6 +306,18 @@ def api_threshold():
             det.threshold = _threshold
     return jsonify({"ok": True, "threshold": _threshold})
 
+@app.route("/api/scan", methods=["POST"])
+def api_scan():
+    """Trigger an immediate network scan outside the normal 1 Hz loop."""
+    global _current_nets
+    nets = scan_networks()
+    with _lock:
+        _current_nets = nets
+        for ssid in nets:
+            if ssid not in _detectors:
+                _detectors[ssid] = MotionDetector(threshold=_threshold, name=ssid)
+    return jsonify({"ok": True, "count": len(nets)})
+
 @app.route("/api/recalibrate", methods=["POST"])
 def api_recalibrate():
     """Reset all detectors and clear score history so calibration restarts."""
@@ -305,6 +347,34 @@ def api_logs():
     except FileNotFoundError:
         return "Log file not found — run the server first.", 404, {"Content-Type": "text/plain"}
 
+@app.route("/api/suggestions")
+def api_suggestions():
+    """Return the most recent log-scan record, or {} if no scan has run yet."""
+    if not SUGGESTIONS_PATH.exists():
+        return jsonify({})
+    try:
+        scans: list[dict] = json.loads(SUGGESTIONS_PATH.read_text(encoding="utf-8"))
+        return jsonify(scans[-1] if scans else {})
+    except Exception:
+        return jsonify({}), 500
+
+@app.route("/api/map")
+def api_map_get():
+    """Return saved house map layout, or empty defaults."""
+    if not MAP_PATH.exists():
+        return jsonify({"rooms": [], "router": None})
+    try:
+        return jsonify(json.loads(MAP_PATH.read_text(encoding="utf-8")))
+    except Exception:
+        return jsonify({"rooms": [], "router": None})
+
+@app.route("/api/map", methods=["POST"])
+def api_map_post():
+    """Save house map layout. Body: {"rooms": [...], "router": {...}}."""
+    data = request.json or {}
+    MAP_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return jsonify({"ok": True})
+
 # ── Dashboard HTML ────────────────────────────────────────────────────────────
 
 DASHBOARD_HTML = """<!DOCTYPE html>
@@ -318,7 +388,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js" async></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:#1e1e2e;color:#cdd6f4;font-family:'Segoe UI',system-ui,sans-serif;padding:16px;max-width:900px;margin:0 auto}
+html{overflow-y:scroll}
+body{background:#1e1e2e;color:#cdd6f4;font-family:'Segoe UI',system-ui,sans-serif;padding:16px 16px 32px;max-width:1200px;margin:0 auto}
 header{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
 header h1{font-size:1.05em;color:#89b4fa;font-weight:600}
 .live{display:flex;align-items:center;gap:6px;font-size:.8em;color:#585b70}
@@ -341,6 +412,9 @@ header h1{font-size:1.05em;color:#89b4fa;font-weight:600}
 .bar-track{flex:1;background:#181825;border-radius:4px;height:6px}
 .bar-fill{height:6px;border-radius:4px;transition:width .4s}
 .bar-pct{width:36px;text-align:right}
+.sort-btn{background:none;border:1px solid #45475a;color:#585b70;padding:2px 7px;border-radius:4px;cursor:pointer;font-size:.72em;white-space:nowrap}
+.sort-btn:hover{background:#45475a}
+.sort-btn.active{border-color:#89b4fa;color:#89b4fa}
 .chip{display:inline-flex;align-items:center;gap:4px;background:#45475a;border-radius:4px;padding:2px 8px;margin:2px;font-size:.82em}
 .chip-del{background:none;border:none;color:#585b70;cursor:pointer;font-size:.95em;padding:0 2px}
 .chip-del:hover{color:#f38ba8}
@@ -354,6 +428,8 @@ header h1{font-size:1.05em;color:#89b4fa;font-weight:600}
 .ev-row{padding:3px 0;font-size:.81em;border-bottom:1px solid #45475a}
 .ev-row:last-child{border-bottom:none}
 .muted{color:#585b70;font-size:.84em}
+#offline{display:none;position:fixed;inset:0;background:rgba(30,30,46,.92);z-index:999;align-items:center;justify-content:center;flex-direction:column;gap:8px;color:#cdd6f4;font-size:1.1em;text-align:center}
+#offline.show{display:flex}
 .loc-name{font-size:1.15em;margin-bottom:4px}
 .loc-bar{font-size:.82em;color:#cba6f7;letter-spacing:-1px}
 .sens-row{display:flex;align-items:center;gap:8px;margin-top:8px;font-size:.82em}
@@ -361,10 +437,12 @@ header h1{font-size:1.05em;color:#89b4fa;font-weight:600}
 .sens-row input[type=range]{flex:1;accent-color:#89b4fa}
 .action-row{display:flex;gap:8px;margin-top:8px}
 .chart-card canvas{max-height:180px}
-@media(max-width:460px){body{padding:10px}.grid2{grid-template-columns:1fr}.record-row{flex-direction:column}.record-row input,.record-row .btn{width:100%}.chart-card canvas{max-height:140px}.net-score{display:none}.net-status{width:auto;min-width:48px;font-size:.76em}.bar-label{width:60px}.sens-high,.sens-low{display:none}}
+@media(max-width:460px){body{padding:10px 10px 24px}.grid2{grid-template-columns:1fr}.record-row{flex-direction:column}.record-row input,.record-row .btn{width:100%}.chart-card canvas{max-height:140px}.net-score{display:none}.net-status{width:auto;min-width:48px;font-size:.76em}.bar-label{width:60px}.sens-high,.sens-low{display:none}}
+#map-canvas{width:100%;aspect-ratio:800/440;border-radius:4px;cursor:crosshair;display:block;background:#181825}
 </style>
 </head>
 <body>
+<div id="offline"><div>Server offline</div><div style="font-size:.8em;color:#585b70">Restart server to continue</div></div>
 <header>
   <h1>Wi-Fi Presence Detector</h1>
   <div class="live"><div class="dot-live"></div> live</div>
@@ -379,7 +457,15 @@ header h1{font-size:1.05em;color:#89b4fa;font-weight:600}
     <div id="loc-bar" class="loc-bar"></div>
   </div>
   <div class="card">
-    <h3>Networks</h3>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <h3 style="margin:0">Networks</h3>
+      <div style="display:flex;gap:4px">
+        <button class="sort-btn" id="refresh-nets-btn" onclick="refreshNetworks()" style="border-color:#45475a">Refresh</button>
+        <button class="sort-btn active" id="sort-name" onclick="setNetSort('name')">Name ↑</button>
+        <button class="sort-btn" id="sort-rssi" onclick="setNetSort('rssi')">Signal</button>
+        <button class="sort-btn" id="sort-score" onclick="setNetSort('score')">Score</button>
+      </div>
+    </div>
     <div id="networks"></div>
   </div>
 </div>
@@ -437,6 +523,18 @@ header h1{font-size:1.05em;color:#89b4fa;font-weight:600}
   <pre id="log-panel" style="background:#181825;color:#a6adc8;font-size:.72em;padding:8px;border-radius:4px;max-height:180px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;margin:0"></pre>
 </div>
 
+<div class="card" style="margin-top:10px">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+    <h3 style="margin:0">House Map</h3>
+    <div style="display:flex;gap:6px">
+      <button class="btn" id="place-router-btn" onclick="togglePlaceRouter()">Place Router</button>
+      <button class="btn" onclick="clearMap()">Clear All</button>
+    </div>
+  </div>
+  <div style="font-size:.75em;color:#585b70;margin-bottom:6px">Drag to draw rooms · right-click to delete · drag router icon to move</div>
+  <canvas id="map-canvas"></canvas>
+</div>
+
 <script>
 const STATE_COLOR = {empty:'#a6e3a1',present:'#f9e2af',moving:'#f38ba8'};
 const STATE_LABEL = {
@@ -446,6 +544,38 @@ const STATE_LABEL = {
 
 let thresholdPending = null;
 let focusedSsid = null;
+let _netSort='name', _netSortAsc=true;
+
+const _SORT_DEFAULTS={name:true,rssi:false,score:false};
+const _SORT_LABELS={name:'Name',rssi:'Signal',score:'Score'};
+
+function setNetSort(field){
+  if(_netSort===field){_netSortAsc=!_netSortAsc;}
+  else{_netSort=field;_netSortAsc=_SORT_DEFAULTS[field];}
+  _updateSortBtns();
+}
+
+function _updateSortBtns(){
+  for(const f of['name','rssi','score']){
+    const btn=document.getElementById('sort-'+f);
+    if(!btn)continue;
+    const on=f===_netSort;
+    btn.classList.toggle('active',on);
+    btn.textContent=_SORT_LABELS[f]+(on?(' '+(_netSortAsc?'↑':'↓')):'');
+  }
+}
+
+function _sortNets(nets){
+  const m=_netSortAsc?1:-1;
+  return[...nets].sort((a,b)=>{
+    if(_netSort==='name')return m*a.ssid.localeCompare(b.ssid);
+    if(_netSort==='rssi')return m*(a.rssi-b.rssi);
+    if(_netSort==='score')return m*(a.score-b.score);
+    return 0;
+  });
+}
+let _failCount = 0;
+const _offline = document.getElementById('offline');
 
 async function toggleFocus(ssid){
   const newFocus = (focusedSsid === ssid) ? null : ssid;
@@ -513,15 +643,15 @@ async function refresh(){
     }
 
     // Networks
-    document.getElementById('networks').innerHTML = d.networks.map(n=>{
+    document.getElementById('networks').innerHTML = _sortNets(d.networks).map(n=>{
       const isFocused = d.focused_ssid === n.ssid;
       const isDimmed  = d.focused_ssid && !isFocused;
       const cls = isFocused ? 'net-row focused' : isDimmed ? 'net-row dim' : 'net-row';
       const dc = n.calibrated?(n.motion?'#f38ba8':'#a6e3a1'):'#585b70';
       const sc = isFocused?'#cba6f7':n.calibrated?(n.motion?'#f38ba8':'#a6e3a1'):'#585b70';
       const st = !n.calibrated?'cal '+n.cal_progress+'/30':isFocused?'FOCUSED':n.motion?'MOTION':'clear';
-      const safe = n.ssid.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
-      return `<div class="${cls}" onclick="toggleFocus('${safe}')">
+      const safeAttr = n.ssid.replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+      return `<div class="${cls}" data-ssid="${safeAttr}" onclick="toggleFocus(this.dataset.ssid)">
         <span style="color:${isFocused?'#cba6f7':dc}">●</span>
         <span class="net-ssid">${n.ssid}</span>
         <span class="net-score">${n.score.toFixed(2)}</span>
@@ -548,6 +678,7 @@ async function refresh(){
     }
 
     _updateChart(d.score_history||[], d.threshold);
+    updateMapColor(d.networks);
 
     // Rooms
     document.getElementById('rooms').innerHTML = d.rooms.map(r=>{
@@ -574,7 +705,11 @@ async function refresh(){
       return `<div class="ev-row" style="color:${EC[e.state]||'#585b70'}">${ts}  ${e.state}${rm}${cf}</div>`;
     }).join('')||'<span class="muted">No events yet.</span>';
 
-  }catch(e){/* server restarting */}
+    _failCount = 0;
+    _offline.classList.remove('show');
+  }catch(e){
+    if(++_failCount >= 3) _offline.classList.add('show');
+  }
 }
 
 async function startRecord(){
@@ -601,6 +736,14 @@ async function recalibrate(){
   await fetch('/api/recalibrate',{method:'POST'});
 }
 
+async function refreshNetworks(){
+  const btn=document.getElementById('refresh-nets-btn');
+  btn.textContent='…';btn.disabled=true;
+  await fetch('/api/scan',{method:'POST'});
+  await refresh();
+  btn.textContent='Refresh';btn.disabled=false;
+}
+
 setInterval(refresh,1000);
 refresh();
 
@@ -614,6 +757,159 @@ async function refreshLogs(){
 }
 setInterval(refreshLogs, 5000);
 refreshLogs();
+
+// ── House Map ─────────────────────────────────────────────────────────────────
+let _mapData={rooms:[],router:null},_mapCtx=null,_mapCanvas=null;
+let _mapDragStart=null,_mapDragCurrent=null;
+let _mapRouterDrag=false,_mapRouterOff={x:0,y:0};
+let _mapPlaceRouter=false,_mapColor='#585b70';
+
+function initMap(){
+  _mapCanvas=document.getElementById('map-canvas');
+  _mapCanvas.width=800;_mapCanvas.height=440;
+  _mapCtx=_mapCanvas.getContext('2d');
+  _mapCanvas.addEventListener('mousedown',_mapDown);
+  _mapCanvas.addEventListener('mousemove',_mapMove);
+  window.addEventListener('mouseup',_mapUp);
+  _mapCanvas.addEventListener('contextmenu',_mapRCtx);
+  _mapCanvas.addEventListener('touchstart',e=>{e.preventDefault();_mapDown(e.touches[0]);},{passive:false});
+  _mapCanvas.addEventListener('touchmove',e=>{e.preventDefault();_mapMove(e.touches[0]);},{passive:false});
+  window.addEventListener('touchend',e=>{if(_mapDragStart||_mapRouterDrag)_mapUp(e.changedTouches[0]);},{passive:false});
+  loadMap();
+}
+
+function _mapPt(e){
+  const r=_mapCanvas.getBoundingClientRect();
+  return{x:(e.clientX-r.left)*800/r.width,y:(e.clientY-r.top)*440/r.height};
+}
+
+function _mapHitRouter(p){
+  if(!_mapData.router)return false;
+  const d=_mapData.router;
+  return Math.hypot(p.x-d.x,p.y-d.y)<16;
+}
+
+function _mapHitRoom(p){
+  for(let i=_mapData.rooms.length-1;i>=0;i--){
+    const r=_mapData.rooms[i];
+    if(p.x>=r.x&&p.x<=r.x+r.w&&p.y>=r.y&&p.y<=r.y+r.h)return i;
+  }
+  return -1;
+}
+
+function _mapDown(e){
+  const p=_mapPt(e);
+  if(_mapPlaceRouter){
+    _mapData.router={x:Math.round(p.x),y:Math.round(p.y)};
+    _mapPlaceRouter=false;
+    document.getElementById('place-router-btn').textContent='Place Router';
+    _mapCanvas.style.cursor='crosshair';
+    saveMap();drawMap();return;
+  }
+  if(_mapHitRouter(p)){
+    _mapRouterDrag=true;
+    _mapRouterOff={x:p.x-_mapData.router.x,y:p.y-_mapData.router.y};
+    return;
+  }
+  _mapDragStart=p;_mapDragCurrent=p;
+}
+
+function _mapMove(e){
+  const p=_mapPt(e);
+  if(_mapRouterDrag){
+    _mapData.router={x:Math.round(p.x-_mapRouterOff.x),y:Math.round(p.y-_mapRouterOff.y)};
+    drawMap();return;
+  }
+  if(_mapDragStart){_mapDragCurrent=p;drawMap();}
+}
+
+function _mapUp(e){
+  const p=_mapPt(e);
+  if(_mapRouterDrag){_mapRouterDrag=false;saveMap();return;}
+  if(_mapDragStart){
+    const s=_mapDragStart;_mapDragStart=null;_mapDragCurrent=null;
+    const x=Math.min(s.x,p.x),y=Math.min(s.y,p.y);
+    const w=Math.abs(p.x-s.x),h=Math.abs(p.y-s.y);
+    if(w<20||h<20){drawMap();return;}
+    const label=(prompt('Room name:','')||'').trim();
+    if(!label){drawMap();return;}
+    _mapData.rooms.push({x:Math.round(x),y:Math.round(y),w:Math.round(w),h:Math.round(h),label});
+    saveMap();drawMap();
+  }
+}
+
+function _mapRCtx(e){
+  e.preventDefault();
+  const p=_mapPt(e);
+  if(_mapHitRouter(p)){_mapData.router=null;saveMap();drawMap();return;}
+  const i=_mapHitRoom(p);
+  if(i>=0){_mapData.rooms.splice(i,1);saveMap();drawMap();}
+}
+
+function togglePlaceRouter(){
+  _mapPlaceRouter=!_mapPlaceRouter;
+  document.getElementById('place-router-btn').textContent=_mapPlaceRouter?'Cancel':'Place Router';
+  _mapCanvas.style.cursor=_mapPlaceRouter?'cell':'crosshair';
+}
+
+async function clearMap(){
+  if(!confirm('Clear all rooms and remove router?'))return;
+  _mapData={rooms:[],router:null};saveMap();drawMap();
+}
+
+async function loadMap(){
+  try{const r=await fetch('/api/map');_mapData=await r.json();if(!_mapData.rooms)_mapData.rooms=[];drawMap();}catch(_){}
+}
+
+async function saveMap(){
+  try{await fetch('/api/map',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(_mapData)});}catch(_){}
+}
+
+function updateMapColor(networks){
+  if(!networks||!networks.length){_mapColor='#585b70';}
+  else{const m=networks.reduce((s,n)=>s+n.rssi,0)/networks.length;
+    _mapColor=m>-60?'#a6e3a1':m>-75?'#f9e2af':'#f38ba8';}
+  drawMap();
+}
+
+function drawMap(){
+  if(!_mapCtx)return;
+  const W=800,H=440,ctx=_mapCtx;
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle='#181825';ctx.fillRect(0,0,W,H);
+  // grid
+  ctx.strokeStyle='#313244';ctx.lineWidth=0.5;
+  for(let x=0;x<W;x+=40){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();}
+  for(let y=0;y<H;y+=40){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
+  // rooms
+  ctx.textAlign='center';ctx.textBaseline='middle';
+  for(const r of _mapData.rooms){
+    ctx.fillStyle=_mapColor+'33';ctx.fillRect(r.x,r.y,r.w,r.h);
+    ctx.strokeStyle=_mapColor;ctx.lineWidth=2;ctx.strokeRect(r.x,r.y,r.w,r.h);
+    ctx.fillStyle='#cdd6f4';ctx.font='14px "Segoe UI",system-ui,sans-serif';
+    ctx.fillText(r.label,r.x+r.w/2,r.y+r.h/2);
+  }
+  // drag preview
+  if(_mapDragStart&&_mapDragCurrent){
+    const x=Math.min(_mapDragStart.x,_mapDragCurrent.x),y=Math.min(_mapDragStart.y,_mapDragCurrent.y);
+    const w=Math.abs(_mapDragCurrent.x-_mapDragStart.x),h=Math.abs(_mapDragCurrent.y-_mapDragStart.y);
+    ctx.fillStyle='#89b4fa22';ctx.fillRect(x,y,w,h);
+    ctx.strokeStyle='#89b4fa';ctx.lineWidth=1.5;ctx.setLineDash([4,4]);
+    ctx.strokeRect(x,y,w,h);ctx.setLineDash([]);
+  }
+  // router
+  if(_mapData.router){
+    const{x:rx,y:ry}=_mapData.router;
+    ctx.strokeStyle='rgba(137,180,250,0.2)';ctx.lineWidth=1;
+    ctx.beginPath();ctx.arc(rx,ry,22,0,Math.PI*2);ctx.stroke();
+    ctx.beginPath();ctx.arc(rx,ry,34,0,Math.PI*2);ctx.stroke();
+    ctx.fillStyle='#89b4fa';ctx.beginPath();ctx.arc(rx,ry,11,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='#1e1e2e';ctx.font='bold 9px "Segoe UI",system-ui,sans-serif';
+    ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText('AP',rx,ry);
+  }
+}
+
+initMap();
 </script>
 </body>
 </html>"""
@@ -622,7 +918,6 @@ refreshLogs();
 
 if __name__ == "__main__":
     import socket
-    import webbrowser
     _setup_logging()
     logger.info("server starting  log=%s", LOG_PATH)
     try:
@@ -632,8 +927,8 @@ if __name__ == "__main__":
 
     t = threading.Thread(target=_scan_loop, daemon=True)
     t.start()
+    threading.Thread(target=_log_watcher, daemon=True).start()
 
     print(f"\n  Dashboard -> http://127.0.0.1:5000")
     print(f"  On network -> http://{ip}:5000\n")
-    threading.Timer(1.0, lambda: webbrowser.open("http://127.0.0.1:5000")).start()
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)

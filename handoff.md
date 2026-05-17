@@ -8,29 +8,46 @@ All meaningful software improvements have been implemented. The next step is a h
 
 ---
 
-## File map
+## Folder layout
 
-| File | Role |
-|---|---|
-| `scanner.py` | Polls `netsh wlan show networks`, returns `{ssid: rssi_dbm}` |
-| `detector.py` | Per-network `MotionDetector` — mean-shift + variance Z-score, adaptive baseline |
-| `classifier.py` | FFT on fused score history → 3-state: `empty / present / moving` |
-| `fingerprinter.py` | KNN room fingerprinting — multi-session, saves to `rooms.json` |
-| `eventlog.py` | Appends state-change events to `events.csv`, loads recent rows |
-| `main.py` | Tkinter desktop GUI — run with `python main.py` |
-| `server.py` | Flask web dashboard — run with `python server.py`, open http://localhost:5000 |
-| `requirements.txt` | `matplotlib`, `numpy`, `flask` |
+```
+wifi-sensor/
+├── wifi_sensor/        # core library package
+│   ├── __init__.py
+│   ├── scanner.py      # polls netsh, returns {ssid: rssi_dbm}
+│   ├── detector.py     # per-network MotionDetector — mean-shift + Z-score
+│   ├── classifier.py   # FFT on fused score history → empty / present / moving
+│   ├── fingerprinter.py# KNN room fingerprinting, saves/loads rooms.json
+│   ├── eventlog.py     # appends state-change events to events.csv
+│   └── log_scanner.py  # background log watcher; sends interesting lines to claude-haiku
+├── main.py             # Tkinter desktop GUI — entry point
+├── server.py           # Flask web dashboard — entry point
+├── config.json         # runtime config (currently: {"threshold": 2.0})
+├── requirements.txt    # matplotlib, numpy, flask, python-dotenv
+├── .env                # ANTHROPIC_API_KEY=sk-ant-... (gitignored)
+├── tests/              # all unittest files
+│   ├── test_classifier.py
+│   ├── test_detector.py
+│   ├── test_fingerprinter.py
+│   ├── test_scanner.py
+│   └── test_server.py
+└── handoff.md
+```
+
+**Runtime-generated (gitignored):** `events.csv`, `rooms.json`, `scan_suggestions.json`, `wifi_sensor.log`, `map.json`
 
 ---
 
 ## How to run
 
 ```
-cd J:\Ido\claude\wifi-sensor
+cd C:\Ido\claude\wifi-sensor
 pip install -r requirements.txt
 
 python main.py      # desktop GUI (Tkinter)
-python server.py    # web dashboard, any device on network can open it
+python server.py    # web dashboard — open http://localhost:5000 (or LAN IP:5000)
+
+python -m unittest discover tests   # run all 67 tests
 ```
 
 ---
@@ -73,6 +90,53 @@ scan_networks()  →  MotionDetector (per network)  →  fused max score
 - `K = 3` — KNN neighbours
 - `MIN_CONFIDENCE = 0.45` — below this returns `("Unknown", conf)`
 - `RECORD_SECONDS = 15` — recording duration per session
+
+### log_scanner.py
+- Background thread in `server.py` watches `wifi_sensor.log` size every 30 s
+- Triggers a scan when log grows by 100 KB
+- Pass 1: 7 pattern rules (stuck-motion recal, netsh timeout, scan loop crash, etc.)
+- Pass 2: sends interesting lines to `claude-haiku` for open-ended suggestions
+- Results saved to `scan_suggestions.json` (last 20 scans, gitignored)
+- `GET /api/suggestions` returns the latest scan record
+- Requires `ANTHROPIC_API_KEY` in `.env`
+
+---
+
+## Recent session changes (2026-05-17)
+
+### Fixes
+- `classifier.py` — removed broken adaptive empty threshold (`noise_floor * 2.0` misclassified continuous high-motion signals as "empty"); replaced with `threshold * EMPTY_FACTOR`
+- `test_detector.py` — `test_motion_clears_on_return_to_baseline` clear-feed count bumped to 60 (EMA α=0.4 needs ~9 steps to converge from a 50 dB excursion, then hysteresis counter drains)
+- All 67 tests pass: `python -m unittest discover tests`
+
+### New: Log scanner (`log_scanner.py`)
+- See log_scanner.py section above
+
+### New: `.env` support
+- `python-dotenv` installed; `.env` file in project root (gitignored)
+- Set `ANTHROPIC_API_KEY=sk-ant-...` in `.env` for the Claude API log scanner
+- `load_dotenv()` called at server startup
+
+### Misc
+- Removed auto-open browser on server start
+- `scan_suggestions.json` and `.env` and `wifi_sensor.log` added to `.gitignore`
+- Test files moved to `tests/` — run with `python -m unittest discover tests`
+
+---
+
+## Recent session changes (2026-05-17, session 2)
+
+### New: House map feature
+- `GET /api/map` + `POST /api/map` in `server.py` — read/write `map.json`
+- New "House Map" card at bottom of dashboard with a `<canvas>` editor
+- Drag to draw rectangular rooms; right-click to delete; "Place Router" button + drag to move
+- Rooms colour-coded every second from mean RSSI of all networks: green >-60 / yellow -60–75 / red <-75 / grey
+- `map.json` gitignored
+
+### New: Package structure (`wifi_sensor/`)
+- Moved all 6 core modules into `wifi_sensor/` package: scanner, detector, classifier, fingerprinter, eventlog, log_scanner
+- Updated imports in main.py, server.py, and all 5 test files
+- All 67 tests still pass
 
 ---
 
@@ -132,7 +196,7 @@ Bytes 12+:   CSI buffer (int8 pairs: imag0, real0, imag1, real1, ...)
 
 ## User context
 - University student, Windows 11, Python 3.14
-- Working directory: `J:\Ido\claude\wifi-sensor\`
+- Working directory: `C:\Ido\claude\wifi-sensor\` (also accessible as `J:\Ido\claude\wifi-sensor\`)
 - Has 6 Wi-Fi networks visible: Snunit74, BeSpot479C_5.0, BeSpot479C_2.4 + 3 others
 - Strongest network: BeSpot479C_2.4 at ~-61 dBm
 - Preferred style: concise responses, no emoji, dark Catppuccin theme in UI
