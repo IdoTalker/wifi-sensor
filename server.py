@@ -5,9 +5,11 @@ and exposes a JSON API + a self-contained single-page HTML dashboard.
 Any device on the local network can open http://<host>:5000 to monitor presence.
 """
 
+import json
 import threading
 import time
 from collections import deque
+from pathlib import Path
 
 from flask import Flask, jsonify, request
 
@@ -16,6 +18,17 @@ from detector import MotionDetector, CALIBRATION_SAMPLES
 from fingerprinter import Fingerprinter, RECORD_SECONDS
 from classifier import classify as fft_classify, MIN_SAMPLES as FFT_MIN_SAMPLES
 from eventlog import log_event, load_recent
+
+CONFIG_PATH = Path(__file__).parent / "config.json"
+
+def _load_config() -> dict:
+    try:
+        return json.loads(CONFIG_PATH.read_text()) if CONFIG_PATH.exists() else {}
+    except Exception:
+        return {}
+
+def _save_config(data: dict):
+    CONFIG_PATH.write_text(json.dumps(data, indent=2))
 
 POLL_INTERVAL = 1.0
 SCORE_HISTORY  = 120
@@ -42,7 +55,7 @@ _record_remaining = 0
 _act_state    = "unknown"
 _b_frac       = 0.0
 _m_frac       = 0.0
-_threshold    = 2.0
+_threshold    = float(_load_config().get("threshold", 2.0))
 
 _prev_state    = "unknown"
 _pending_state = "unknown"
@@ -179,6 +192,7 @@ def api_status():
             "record_remaining": _record_remaining,
             "rooms":            rooms,
             "threshold":        _threshold,
+            "score_history":    list(_score_history),
             "events":           load_recent(10),
         })
 
@@ -212,6 +226,7 @@ def api_threshold():
     if val is None:
         return jsonify({"error": "value required"}), 400
     _threshold = max(0.5, min(5.0, float(val)))
+    _save_config({"threshold": _threshold})
     with _lock:
         for det in _detectors.values():
             det.threshold = _threshold
@@ -233,7 +248,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
 <title>Wi-Fi Presence Detector</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#1e1e2e;color:#cdd6f4;font-family:'Segoe UI',system-ui,sans-serif;padding:16px;max-width:900px;margin:0 auto}
@@ -242,7 +260,7 @@ header h1{font-size:1.05em;color:#89b4fa;font-weight:600}
 .live{display:flex;align-items:center;gap:6px;font-size:.8em;color:#585b70}
 .dot-live{width:8px;height:8px;background:#a6e3a1;border-radius:50%;animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
-#status-box{padding:20px;text-align:center;font-size:1.9em;font-weight:700;border-radius:8px;margin-bottom:12px;background:#313244;transition:background .4s,color .4s}
+#status-box{padding:20px;text-align:center;font-size:clamp(1.2em,5vw,1.9em);font-weight:700;border-radius:8px;margin-bottom:12px;background:#313244;transition:background .4s,color .4s}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
 @media(max-width:560px){.grid2{grid-template-columns:1fr}}
 .card{background:#313244;border-radius:8px;padding:12px}
@@ -260,7 +278,7 @@ header h1{font-size:1.05em;color:#89b4fa;font-weight:600}
 .record-row{display:flex;gap:8px;margin-top:8px}
 .record-row input{flex:1;background:#1e1e2e;border:1px solid #45475a;color:#cdd6f4;padding:4px 8px;border-radius:4px;font-size:.84em;outline:none}
 .record-row input:focus{border-color:#89b4fa}
-.btn{background:#1e1e2e;border:1px solid #45475a;color:#89b4fa;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:.84em}
+.btn{background:#1e1e2e;border:1px solid #45475a;color:#89b4fa;padding:6px 14px;min-height:36px;border-radius:4px;cursor:pointer;font-size:.84em}
 .btn:hover{background:#45475a}
 .btn:disabled{opacity:.4;cursor:default}
 #rec-status{font-size:.78em;color:#fab387;margin-top:4px;min-height:1.2em}
@@ -273,6 +291,8 @@ header h1{font-size:1.05em;color:#89b4fa;font-weight:600}
 .sens-row label{color:#585b70}
 .sens-row input[type=range]{flex:1;accent-color:#89b4fa}
 .action-row{display:flex;gap:8px;margin-top:8px}
+.chart-card canvas{max-height:180px}
+@media(max-width:460px){.grid2{grid-template-columns:1fr}.record-row{flex-direction:column}.record-row input,.record-row .btn{width:100%}.chart-card canvas{max-height:140px}}
 </style>
 </head>
 <body>
@@ -335,6 +355,11 @@ header h1{font-size:1.05em;color:#89b4fa;font-weight:600}
   <div id="events"></div>
 </div>
 
+<div class="card chart-card" style="margin-top:10px">
+  <h3>Anomaly Score</h3>
+  <canvas id="score-chart"></canvas>
+</div>
+
 <script>
 const STATE_COLOR = {empty:'#a6e3a1',present:'#f9e2af',moving:'#f38ba8'};
 const STATE_LABEL = {
@@ -343,6 +368,33 @@ const STATE_LABEL = {
 };
 
 let thresholdPending = null;
+
+const _scoreChart = new Chart(document.getElementById('score-chart').getContext('2d'), {
+  type:'line',
+  data:{
+    labels:[],
+    datasets:[
+      {label:'Score',data:[],borderColor:'#89b4fa',borderWidth:1.5,pointRadius:0,tension:0.3,fill:false},
+      {label:'Threshold',data:[],borderColor:'#f38ba8',borderWidth:1,borderDash:[4,4],pointRadius:0,fill:false}
+    ]
+  },
+  options:{
+    animation:false,responsive:true,maintainAspectRatio:true,
+    plugins:{legend:{display:false}},
+    scales:{
+      x:{ticks:{color:'#585b70',font:{size:9},maxTicksLimit:10},grid:{color:'#45475a'}},
+      y:{min:0,ticks:{color:'#585b70',font:{size:9}},grid:{color:'#45475a'}}
+    }
+  }
+});
+
+function _updateChart(history, threshold){
+  const n = history.length;
+  _scoreChart.data.labels = Array.from({length:n},(_,i)=>i-n+1);
+  _scoreChart.data.datasets[0].data = history;
+  _scoreChart.data.datasets[1].data = Array(n).fill(threshold);
+  _scoreChart.update('none');
+}
 
 async function refresh(){
   try{
@@ -399,6 +451,8 @@ async function refresh(){
       document.getElementById('threshold').value = d.threshold;
       document.getElementById('thresh-val').textContent = d.threshold.toFixed(1);
     }
+
+    _updateChart(d.score_history||[], d.threshold);
 
     // Rooms
     document.getElementById('rooms').innerHTML = d.rooms.map(r=>{
