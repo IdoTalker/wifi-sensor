@@ -14,6 +14,7 @@ WINDOW_SIZE = 60
 VAR_WINDOW = 8        # short window for rolling variance computation
 HYSTERESIS = 3
 ADAPT_RATE = 0.015    # EMA rate for slow baseline drift during clear periods
+EMA_ALPHA  = 0.4      # smoothing weight on each new RSSI sample (reduces netsh quantization noise)
 
 
 class MotionDetector:
@@ -42,6 +43,7 @@ class MotionDetector:
         self._consecutive_anomalies: int = 0
         self._motion: bool = False
         self._score: float = 0.0
+        self._ema: float | None = None
 
     @property
     def calibrated(self) -> bool:
@@ -62,6 +64,12 @@ class MotionDetector:
         manages the hysteresis counter, and slowly adapts the baseline during
         clear periods.
         """
+        if self._ema is None:
+            self._ema = rssi
+        else:
+            self._ema = EMA_ALPHA * rssi + (1.0 - EMA_ALPHA) * self._ema
+        rssi = self._ema
+
         self._window.append(rssi)
         self._recent.append(rssi)
 

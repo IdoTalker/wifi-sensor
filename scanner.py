@@ -5,7 +5,7 @@ import re
 
 
 def scan_networks() -> dict[str, float]:
-    """Return {ssid: rssi_dbm} for all visible networks."""
+    """Return {"SSID [bssid]": rssi_dbm} for every visible BSSID."""
     try:
         result = subprocess.run(
             ["netsh", "wlan", "show", "networks", "mode=bssid"],
@@ -16,19 +16,22 @@ def scan_networks() -> dict[str, float]:
         return {}
 
     networks: dict[str, float] = {}
-    current_ssid = None
+    current_ssid: str | None = None
+    current_bssid: str | None = None
 
     for line in output.splitlines():
-        ssid_match = re.match(r"^\s*SSID\s+\d+\s*:\s*(.+)", line)
+        ssid_match   = re.match(r"^\s*SSID\s+\d+\s*:\s*(.+)", line)
+        bssid_match  = re.match(r"^\s*BSSID\s+\d+\s*:\s*(.+)", line)
         signal_match = re.match(r"^\s*Signal\s*:\s*(\d+)%", line)
 
         if ssid_match:
-            current_ssid = ssid_match.group(1).strip()
-        elif signal_match and current_ssid:
+            current_ssid  = ssid_match.group(1).strip()
+            current_bssid = None
+        elif bssid_match:
+            current_bssid = bssid_match.group(1).strip()
+        elif signal_match and current_ssid and current_bssid:
             pct = int(signal_match.group(1))
-            dbm = (pct / 2) - 100  # netsh reports 0–100 %; Microsoft's documented conversion to dBm
-            # Keep best signal if SSID appears multiple times (multiple BSSIDs)
-            if current_ssid not in networks or dbm > networks[current_ssid]:
-                networks[current_ssid] = dbm
+            dbm = (pct / 2) - 100  # netsh 0–100 % → dBm (Microsoft documented conversion)
+            networks[f"{current_ssid} [{current_bssid}]"] = dbm
 
     return networks

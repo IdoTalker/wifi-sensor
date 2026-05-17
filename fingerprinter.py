@@ -14,7 +14,7 @@ from pathlib import Path
 RECORD_SECONDS = 15
 SAVE_PATH = Path(__file__).parent / "rooms.json"
 
-K = 3                    # neighbours to vote on
+K = 5                    # neighbours to vote on
 MIN_CONFIDENCE = 0.45    # below this the classifier abstains ("Unknown")
 
 
@@ -83,13 +83,13 @@ class Fingerprinter:
         neighbours.sort(key=lambda x: x[0])
         k_nearest = neighbours[:K]
 
-        # Majority vote
-        votes: dict[str, int] = {}
-        for _, room_name in k_nearest:
-            votes[room_name] = votes.get(room_name, 0) + 1
+        # Inverse-distance weighted vote
+        weights: dict[str, float] = {}
+        for dist, room_name in k_nearest:
+            weights[room_name] = weights.get(room_name, 0.0) + 1.0 / max(dist, 0.01)
 
-        winner = max(votes, key=votes.__getitem__)
-        confidence = votes[winner] / len(k_nearest)
+        winner = max(weights, key=weights.__getitem__)
+        confidence = weights[winner] / sum(weights.values())
 
         if confidence < MIN_CONFIDENCE:
             return "Unknown", confidence
