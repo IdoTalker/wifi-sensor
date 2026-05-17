@@ -31,7 +31,7 @@ def _save_config(data: dict):
     CONFIG_PATH.write_text(json.dumps(data, indent=2))
 
 POLL_INTERVAL = 1.0
-SCORE_HISTORY  = 120
+SCORE_HISTORY  = 300  # 5-minute buffer gives FFT resolution of ~0.003 Hz
 DEBOUNCE_TICKS = 3   # seconds at 1 Hz
 
 # ── shared state ──────────────────────────────────────────────────────────────
@@ -80,16 +80,19 @@ def _scan_loop():
                 if ssid not in _detectors:
                     _detectors[ssid] = MotionDetector(threshold=_threshold)
 
-            scores: list[float] = []
+            scored_pairs: list[tuple[float, float]] = []
             for ssid, rssi in nets.items():
                 det = _detectors[ssid]
                 det.update(rssi)
                 _net_scores[ssid] = det.score()
                 _net_motion[ssid] = det.is_motion()
                 if det.calibrated:
-                    scores.append(det.score())
-            if scores:
-                _score_history.append(max(scores))
+                    weight = max(rssi + 100.0, 1.0)  # stronger signal → more weight
+                    scored_pairs.append((det.score(), weight))
+            if scored_pairs:
+                total_w = sum(w for _, w in scored_pairs)
+                fused = sum(s * w for s, w in scored_pairs) / total_w
+                _score_history.append(fused)
 
             if _recording:
                 _record_buf.append(dict(nets))
@@ -516,6 +519,7 @@ refresh();
 
 if __name__ == "__main__":
     import socket
+    import webbrowser
     try:
         ip = socket.gethostbyname(socket.gethostname())
     except Exception:
@@ -526,4 +530,5 @@ if __name__ == "__main__":
 
     print(f"\n  Dashboard → http://localhost:5000")
     print(f"  On network → http://{ip}:5000\n")
+    threading.Timer(1.0, lambda: webbrowser.open("http://localhost:5000")).start()
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)

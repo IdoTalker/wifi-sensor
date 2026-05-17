@@ -23,7 +23,7 @@ from classifier import classify as fft_classify, MIN_SAMPLES as FFT_MIN_SAMPLES
 from eventlog import log_event, load_recent
 
 POLL_INTERVAL = 1.0
-SCORE_HISTORY = 120  # 2-minute buffer gives FFT resolution of ~0.008 Hz
+SCORE_HISTORY = 300  # 5-minute buffer gives FFT resolution of ~0.003 Hz
 
 BG     = "#1e1e2e"
 BG2    = "#181825"
@@ -300,16 +300,19 @@ class App(tk.Tk):
                         self._detectors[ssid] = MotionDetector(threshold=self._threshold_var.get())
 
                 # Update motion detectors
-                scores: list[float] = []
+                scored_pairs: list[tuple[float, float]] = []
                 for ssid, rssi in nets.items():
                     det = self._detectors[ssid]
                     det.update(rssi)
                     self._net_scores[ssid] = det.score()
                     self._net_motion[ssid] = det.is_motion()
                     if det.calibrated:
-                        scores.append(det.score())
-                if scores:
-                    self._score_history.append(max(scores))
+                        weight = max(rssi + 100.0, 1.0)  # stronger signal → more weight
+                        scored_pairs.append((det.score(), weight))
+                if scored_pairs:
+                    total_w = sum(w for _, w in scored_pairs)
+                    fused = sum(s * w for s, w in scored_pairs) / total_w
+                    self._score_history.append(fused)
 
                 # Recording or classifying
                 if self._recording:

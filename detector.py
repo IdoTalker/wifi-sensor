@@ -15,6 +15,7 @@ VAR_WINDOW = 8        # short window for rolling variance computation
 HYSTERESIS = 3
 ADAPT_RATE = 0.015    # EMA rate for slow baseline drift during clear periods
 EMA_ALPHA  = 0.4      # smoothing weight on each new RSSI sample (reduces netsh quantization noise)
+STUCK_MOTION_TICKS = 300   # 5 min of continuous motion → silent recalibrate
 
 
 class MotionDetector:
@@ -44,6 +45,7 @@ class MotionDetector:
         self._motion: bool = False
         self._score: float = 0.0
         self._ema: float | None = None
+        self._stuck_ticks: int = 0
 
     @property
     def calibrated(self) -> bool:
@@ -103,8 +105,15 @@ class MotionDetector:
         anomalous = self._score > self.threshold
         if anomalous:
             self._consecutive_anomalies += 1
+            self._stuck_ticks += 1
+            # If stuck in motion for too long the environment has permanently changed; recalibrate
+            if self._stuck_ticks >= STUCK_MOTION_TICKS:
+                saved = self.threshold
+                self.__init__(threshold=saved)
+                return False
         else:
             self._consecutive_anomalies = max(0, self._consecutive_anomalies - 1)
+            self._stuck_ticks = 0
             # Adaptive baseline: slowly track environmental drift when clear
             self._baseline_mean += ADAPT_RATE * (rssi - self._baseline_mean)
 

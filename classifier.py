@@ -27,11 +27,12 @@ def classify(scores: list[float], threshold: float) -> tuple[str, float, float]:
     if len(scores) < MIN_SAMPLES:
         return "unknown", 0.0, 0.0
 
-    arr = np.array(scores, dtype=float)
-    recent_mean = float(np.mean(arr[-10:]))
+    arr_orig = np.array(scores, dtype=float)
+    recent_mean = float(np.mean(arr_orig[-10:]))
+    noise_floor = float(np.percentile(arr_orig, 20))  # bottom 20% = quiet baseline
 
     # Remove DC component before FFT so power fractions reflect AC content only
-    arr -= np.mean(arr)
+    arr = arr_orig - np.mean(arr_orig)
     power = np.abs(np.fft.rfft(arr)) ** 2
     freqs = np.fft.rfftfreq(len(arr), d=1.0)  # d=1 second per sample
 
@@ -46,7 +47,9 @@ def classify(scores: list[float], threshold: float) -> tuple[str, float, float]:
     b_frac = band_fraction(*BREATHING_BAND)
     m_frac = band_fraction(*MOTION_BAND)
 
-    if recent_mean < threshold * EMPTY_FACTOR:
+    # Adaptive empty threshold: raise bar in noisy environments
+    empty_thresh = max(noise_floor * 2.0, threshold * EMPTY_FACTOR)
+    if recent_mean < empty_thresh:
         state = "empty"
     elif m_frac >= b_frac:
         state = "moving"
