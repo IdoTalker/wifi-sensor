@@ -1,8 +1,8 @@
 """Tests for fingerprinter.py — KNN room classification and persistence."""
 import json
+import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 from wifi_sensor.fingerprinter import Fingerprinter, RoomFingerprint, _distance
 
@@ -32,8 +32,11 @@ class TestDistance(unittest.TestCase):
 
 class TestRecord(unittest.TestCase):
     def setUp(self):
-        self.fp = Fingerprinter()
-        self.fp.rooms = {}
+        self._tmp = Path(tempfile.mktemp(suffix=".json"))
+        self.fp = Fingerprinter(save_path=self._tmp)
+
+    def tearDown(self):
+        self._tmp.unlink(missing_ok=True)
 
     def test_record_creates_room(self):
         self.fp.record("living", [SAMPLE_A] * 5)
@@ -44,6 +47,12 @@ class TestRecord(unittest.TestCase):
         self.fp.record("living", [SAMPLE_B] * 5)
         self.assertEqual(self.fp.rooms["living"].sessions, 2)
         self.assertEqual(len(self.fp.rooms["living"].samples), 10)
+
+    def test_record_caps_samples_at_max(self):
+        fp = Fingerprinter(save_path=self._tmp, max_samples=8)
+        fp.record("living", [SAMPLE_A] * 5)
+        fp.record("living", [SAMPLE_B] * 5)
+        self.assertLessEqual(len(fp.rooms["living"].samples), 8)
 
     def test_delete_removes_room(self):
         self.fp.record("living", [SAMPLE_A] * 5)
@@ -56,14 +65,16 @@ class TestRecord(unittest.TestCase):
 
 class TestClassify(unittest.TestCase):
     def setUp(self):
-        self.fp = Fingerprinter()
-        self.fp.rooms = {}
+        self._tmp = Path(tempfile.mktemp(suffix=".json"))
+        self.fp = Fingerprinter(save_path=self._tmp)
         self.fp.record("room_a", [SAMPLE_A] * 15)
         self.fp.record("room_c", [SAMPLE_C] * 15)
 
+    def tearDown(self):
+        self._tmp.unlink(missing_ok=True)
+
     def test_classify_returns_none_when_no_rooms(self):
-        empty = Fingerprinter()
-        empty.rooms = {}
+        empty = Fingerprinter(save_path=Path(tempfile.mktemp(suffix=".json")))
         self.assertIsNone(empty.classify(SAMPLE_A))
 
     def test_classify_near_a_returns_room_a(self):
@@ -83,45 +94,25 @@ class TestClassify(unittest.TestCase):
 
 class TestPersistence(unittest.TestCase):
     def test_save_and_load(self):
-        import tempfile, os
         tmp = Path(tempfile.mktemp(suffix=".json"))
         try:
-            with patch("wifi_sensor.fingerprinter.SAVE_PATH", tmp):
-                fp = Fingerprinter()
-                fp.rooms = {}
-                fp.record("kitchen", [SAMPLE_A] * 5)
-                fp2 = Fingerprinter()
-                fp2.rooms = {}
-                fp2._save = fp._save.__func__.__get__(fp2)
-                fp2._load = fp._load.__func__.__get__(fp2)
-                # Manually save then reload
-                import wifi_sensor.fingerprinter as fm
-                old_path = fm.SAVE_PATH
-                fm.SAVE_PATH = tmp
-                fp.rooms["kitchen"] = fp.rooms["kitchen"]
-                fp._save()
-                fp_loaded = Fingerprinter()
-                self.assertIn("kitchen", fp_loaded.rooms)
-                fm.SAVE_PATH = old_path
+            fp = Fingerprinter(save_path=tmp)
+            fp.record("kitchen", [SAMPLE_A] * 5)
+            fp2 = Fingerprinter(save_path=tmp)
+            self.assertIn("kitchen", fp2.rooms)
+            self.assertEqual(len(fp2.rooms["kitchen"].samples), 5)
         finally:
             tmp.unlink(missing_ok=True)
 
     def test_migrate_old_format(self):
-        import tempfile
         tmp = Path(tempfile.mktemp(suffix=".json"))
-        import wifi_sensor.fingerprinter as fm
-        old_path = fm.SAVE_PATH
         try:
-            # Write old centroid-only format
             tmp.write_text(json.dumps({"hall": {"net1": -60.0, "net2": -70.0}}))
-            fm.SAVE_PATH = tmp
-            fp = Fingerprinter()
+            fp = Fingerprinter(save_path=tmp)
             self.assertIn("hall", fp.rooms)
             self.assertEqual(fp.rooms["hall"].sessions, 1)
-            # The old centroid dict becomes one sample
             self.assertEqual(len(fp.rooms["hall"].samples), 1)
         finally:
-            fm.SAVE_PATH = old_path
             tmp.unlink(missing_ok=True)
 
 

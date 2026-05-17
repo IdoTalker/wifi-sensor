@@ -9,6 +9,8 @@ persisted to rooms.json and auto-migrated from the legacy centroid-only format.
 import json
 import logging
 import math
+import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -40,7 +42,17 @@ def _distance(a: dict[str, float], b: dict[str, float]) -> float | None:
 
 
 class Fingerprinter:
-    def __init__(self):
+    def __init__(
+        self,
+        save_path: Path | None = None,
+        k: int | None = None,
+        min_confidence: float | None = None,
+        max_samples: int = 500,
+    ):
+        self.save_path      = SAVE_PATH      if save_path      is None else save_path
+        self.k              = K              if k              is None else k
+        self.min_confidence = MIN_CONFIDENCE if min_confidence is None else min_confidence
+        self.max_samples    = max_samples
         self.rooms: dict[str, RoomFingerprint] = {}
         self._load()
 
@@ -53,13 +65,17 @@ class Fingerprinter:
             self.rooms[name].sessions += 1
         else:
             self.rooms[name] = RoomFingerprint(name=name, sessions=1, samples=list(samples))
-        sessions = self.rooms[name].sessions
-        logger.info("recorded room %r  sessions=%d  total_samples=%d", name, sessions, len(self.rooms[name].samples))
+        fp = self.rooms[name]
+        if len(fp.samples) > self.max_samples:
+            fp.samples = fp.samples[-self.max_samples:]
+        logger.info("recorded room %r  sessions=%d  total_samples=%d", name, fp.sessions, len(fp.samples))
         self._save()
 
     def delete(self, name: str):
+        if name not in self.rooms:
+            return
+        self.rooms.pop(name)
         logger.info("deleted room %r", name)
-        self.rooms.pop(name, None)
         self._save()
 
     # ── classification ────────────────────────────────────────────────────────
@@ -87,7 +103,7 @@ class Fingerprinter:
             return None
 
         neighbours.sort(key=lambda x: x[0])
-        k_nearest = neighbours[:K]
+        k_nearest = neighbours[:self.k]
 
         # Inverse-distance weighted vote
         weights: dict[str, float] = {}
@@ -97,7 +113,7 @@ class Fingerprinter:
         winner = max(weights, key=weights.__getitem__)
         confidence = weights[winner] / sum(weights.values())
 
-        if confidence < MIN_CONFIDENCE:
+        if confidence < self.min_confidence:
             return "Unknown", confidence
 
         return winner, confidence
@@ -105,19 +121,26 @@ class Fingerprinter:
     # ── persistence ───────────────────────────────────────────────────────────
 
     def _save(self):
-        """Serialise all rooms (with their raw sample lists) to rooms.json."""
+        """Serialise all rooms to save_path atomically via a temp file + rename."""
         data = {
             name: {"sessions": fp.sessions, "samples": fp.samples}
             for name, fp in self.rooms.items()
         }
-        SAVE_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        fd, tmp = tempfile.mkstemp(dir=self.save_path.parent, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, self.save_path)
+        except Exception:
+            os.unlink(tmp)
+            raise
 
     def _load(self):
-        """Deserialise rooms.json, migrating the old centroid-only format if needed."""
-        if not SAVE_PATH.exists():
+        """Deserialise save_path, migrating the old centroid-only format if needed."""
+        if not self.save_path.exists():
             return
         try:
-            data = json.loads(SAVE_PATH.read_text(encoding="utf-8"))
+            data = json.loads(self.save_path.read_text(encoding="utf-8"))
             loaded = {}
             for name, val in data.items():
                 # Handle both old format (plain dict of means) and new format
@@ -132,4 +155,5 @@ class Fingerprinter:
                     loaded[name] = RoomFingerprint(name=name, sessions=1, samples=[val])
             self.rooms = loaded
         except Exception:
+            logger.exception("failed to load %s — starting with empty rooms", self.save_path)
             self.rooms = {}

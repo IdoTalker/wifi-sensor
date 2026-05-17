@@ -678,7 +678,7 @@ async function refresh(){
     }
 
     _updateChart(d.score_history||[], d.threshold);
-    updateMapColor(d.networks);
+    updateMapColor(d.networks,d.location);
 
     // Rooms
     document.getElementById('rooms').innerHTML = d.rooms.map(r=>{
@@ -763,6 +763,7 @@ let _mapData={rooms:[],router:null},_mapCtx=null,_mapCanvas=null;
 let _mapDragStart=null,_mapDragCurrent=null;
 let _mapRouterDrag=false,_mapRouterOff={x:0,y:0};
 let _mapPlaceRouter=false,_mapColor='#585b70';
+let _mapActiveRoom=null,_mapActiveConf=0;
 
 function initMap(){
   _mapCanvas=document.getElementById('map-canvas');
@@ -865,10 +866,12 @@ async function saveMap(){
   try{await fetch('/api/map',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(_mapData)});}catch(_){}
 }
 
-function updateMapColor(networks){
+function updateMapColor(networks,location){
   if(!networks||!networks.length){_mapColor='#585b70';}
   else{const m=networks.reduce((s,n)=>s+n.rssi,0)/networks.length;
     _mapColor=m>-60?'#a6e3a1':m>-75?'#f9e2af':'#f38ba8';}
+  _mapActiveRoom=(location&&location.room!=='Unknown')?location.room:null;
+  _mapActiveConf=location?location.confidence:0;
   drawMap();
 }
 
@@ -884,10 +887,20 @@ function drawMap(){
   // rooms
   ctx.textAlign='center';ctx.textBaseline='middle';
   for(const r of _mapData.rooms){
-    ctx.fillStyle=_mapColor+'33';ctx.fillRect(r.x,r.y,r.w,r.h);
-    ctx.strokeStyle=_mapColor;ctx.lineWidth=2;ctx.strokeRect(r.x,r.y,r.w,r.h);
-    ctx.fillStyle='#cdd6f4';ctx.font='14px "Segoe UI",system-ui,sans-serif';
-    ctx.fillText(r.label,r.x+r.w/2,r.y+r.h/2);
+    const isActive=_mapActiveRoom&&r.label===_mapActiveRoom;
+    if(isActive){
+      ctx.fillStyle='#cba6f766';ctx.fillRect(r.x,r.y,r.w,r.h);
+      ctx.strokeStyle='#cba6f7';ctx.lineWidth=3;ctx.strokeRect(r.x,r.y,r.w,r.h);
+      ctx.fillStyle='#cba6f7';ctx.font='bold 14px "Segoe UI",system-ui,sans-serif';
+      ctx.fillText(r.label,r.x+r.w/2,r.y+r.h/2-8);
+      ctx.font='11px "Segoe UI",system-ui,sans-serif';
+      ctx.fillText(Math.round(_mapActiveConf*100)+'%',r.x+r.w/2,r.y+r.h/2+9);
+    }else{
+      ctx.fillStyle=_mapColor+'33';ctx.fillRect(r.x,r.y,r.w,r.h);
+      ctx.strokeStyle=_mapColor;ctx.lineWidth=2;ctx.strokeRect(r.x,r.y,r.w,r.h);
+      ctx.fillStyle='#cdd6f4';ctx.font='14px "Segoe UI",system-ui,sans-serif';
+      ctx.fillText(r.label,r.x+r.w/2,r.y+r.h/2);
+    }
   }
   // drag preview
   if(_mapDragStart&&_mapDragCurrent){
