@@ -93,85 +93,84 @@ def _scan_loop():
     global _prev_state, _pending_state, _pending_count, _current_nets
 
     while True:
+        start = time.monotonic()
         try:
-            start = time.monotonic()
-            nets  = scan_networks()
-        except Exception:
-            logger.exception("unhandled error in scan_networks()")
-            time.sleep(1.0)
-            continue
+            nets = scan_networks()
 
-        with _lock:
-            _current_nets = nets
+            with _lock:
+                _current_nets = nets
 
-            for ssid in nets:
-                if ssid not in _detectors:
-                    _detectors[ssid] = MotionDetector(threshold=_threshold, name=ssid)
+                for ssid in nets:
+                    if ssid not in _detectors:
+                        _detectors[ssid] = MotionDetector(threshold=_threshold, name=ssid)
 
-            scored_pairs: list[tuple[str, float, float]] = []  # (key, score, weight)
-            for ssid, rssi in nets.items():
-                det = _detectors[ssid]
-                det.update(rssi)
-                _net_scores[ssid] = det.score()
-                _net_motion[ssid] = det.is_motion()
-                if det.calibrated:
-                    weight = max(rssi + 100.0, 1.0)  # stronger signal → more weight
-                    scored_pairs.append((ssid, det.score(), weight))
-            active = [(s, w) for k, s, w in scored_pairs
-                      if _focused_ssid is None or k == _focused_ssid]
-            if active:
-                total_w = sum(w for _, w in active)
-                fused = sum(s * w for s, w in active) / total_w
-                _score_history.append(fused)
+                scored_pairs: list[tuple[str, float, float]] = []  # (key, score, weight)
+                for ssid, rssi in nets.items():
+                    det = _detectors[ssid]
+                    det.update(rssi)
+                    _net_scores[ssid] = det.score()
+                    _net_motion[ssid] = det.is_motion()
+                    if det.calibrated:
+                        weight = max(rssi + 100.0, 1.0)  # stronger signal → more weight
+                        scored_pairs.append((ssid, det.score(), weight))
+                active = [(s, w) for k, s, w in scored_pairs
+                          if _focused_ssid is None or k == _focused_ssid]
+                if active:
+                    total_w = sum(w for _, w in active)
+                    fused = sum(s * w for s, w in active) / total_w
+                    _score_history.append(fused)
 
-            # Prune uncalibrated detectors absent for too long
-            for key in list(_detectors.keys()):
-                if key in nets:
-                    _net_absent[key] = 0
+                # Prune uncalibrated detectors absent for too long
+                for key in list(_detectors.keys()):
+                    if key in nets:
+                        _net_absent[key] = 0
+                    else:
+                        _net_absent[key] = _net_absent.get(key, 0) + 1
+                        if _net_absent[key] >= STALE_ABSENT_TICKS and not _detectors[key].calibrated:
+                            logger.info("pruning stale uncalibrated detector %r (absent %d scans)", key, _net_absent[key])
+                            del _detectors[key]
+                            del _net_absent[key]
+
+                if _recording:
+                    _record_buf.append(dict(nets))
+                    _record_remaining -= 1
+                    if _record_remaining <= 0:
+                        _fingerprinter.record(_record_name, _record_buf)
+                        _recording = False
                 else:
-                    _net_absent[key] = _net_absent.get(key, 0) + 1
-                    if _net_absent[key] >= STALE_ABSENT_TICKS and not _detectors[key].calibrated:
-                        logger.info("pruning stale uncalibrated detector %r (absent %d scans)", key, _net_absent[key])
-                        del _detectors[key]
-                        del _net_absent[key]
+                    _location = _fingerprinter.classify(nets)
 
-            if _recording:
-                _record_buf.append(dict(nets))
-                _record_remaining -= 1
-                if _record_remaining <= 0:
-                    _fingerprinter.record(_record_name, _record_buf)
-                    _recording = False
-            else:
-                _location = _fingerprinter.classify(nets)
+                # Determine activity state
+                history = list(_score_history)
+                all_cal = bool(_detectors) and all(d.calibrated for d in _detectors.values())
 
-            # Determine activity state
-            history = list(_score_history)
-            all_cal = bool(_detectors) and all(d.calibrated for d in _detectors.values())
+                if not _detectors:
+                    _act_state = "unknown"
+                elif not all_cal:
+                    _act_state = "calibrating"
+                elif len(history) < FFT_MIN_SAMPLES:
+                    _act_state = "analyzing"
+                else:
+                    _act_state, _b_frac, _m_frac = fft_classify(history, _threshold)
 
-            if not _detectors:
-                _act_state = "unknown"
-            elif not all_cal:
-                _act_state = "calibrating"
-            elif len(history) < FFT_MIN_SAMPLES:
-                _act_state = "analyzing"
-            else:
-                _act_state, _b_frac, _m_frac = fft_classify(history, _threshold)
+                # Debounce + event log
+                if _act_state == _pending_state:
+                    _pending_count += 1
+                else:
+                    _pending_state = _act_state
+                    _pending_count = 1
 
-            # Debounce + event log
-            if _act_state == _pending_state:
-                _pending_count += 1
-            else:
-                _pending_state = _act_state
-                _pending_count = 1
+                if _pending_count == DEBOUNCE_TICKS and _act_state != _prev_state:
+                    room_name = _location[0] if _location and _location[0] != "Unknown" else None
+                    conf      = _location[1] if _location else 0.0
+                    log_event(_act_state, room_name, conf)
+                    _prev_state = _act_state
 
-            if _pending_count == DEBOUNCE_TICKS and _act_state != _prev_state:
-                room_name = _location[0] if _location and _location[0] != "Unknown" else None
-                conf      = _location[1] if _location else 0.0
-                log_event(_act_state, room_name, conf)
-                _prev_state = _act_state
-
-        elapsed = time.monotonic() - start
-        time.sleep(max(0.0, POLL_INTERVAL - elapsed))
+            elapsed = time.monotonic() - start
+            time.sleep(max(0.0, POLL_INTERVAL - elapsed))
+        except Exception:
+            logger.exception("unhandled error in scan loop — restarting iteration")
+            time.sleep(1.0)
 
 # ── Flask app ─────────────────────────────────────────────────────────────────
 
@@ -316,7 +315,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>Wi-Fi Presence Detector</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js" async></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#1e1e2e;color:#cdd6f4;font-family:'Segoe UI',system-ui,sans-serif;padding:16px;max-width:900px;margin:0 auto}
@@ -455,26 +454,29 @@ async function toggleFocus(ssid){
   focusedSsid = newFocus;
 }
 
-const _scoreChart = new Chart(document.getElementById('score-chart').getContext('2d'), {
-  type:'line',
-  data:{
-    labels:[],
-    datasets:[
+let _scoreChart = null;
+
+function _ensureChart(){
+  if(_scoreChart || typeof Chart==='undefined') return;
+  _scoreChart = new Chart(document.getElementById('score-chart').getContext('2d'), {
+    type:'line',
+    data:{labels:[],datasets:[
       {label:'Score',data:[],borderColor:'#89b4fa',borderWidth:1.5,pointRadius:0,tension:0.3,fill:false},
       {label:'Threshold',data:[],borderColor:'#f38ba8',borderWidth:1,borderDash:[4,4],pointRadius:0,fill:false}
-    ]
-  },
-  options:{
-    animation:false,responsive:true,maintainAspectRatio:true,
-    plugins:{legend:{display:false}},
-    scales:{
-      x:{ticks:{color:'#585b70',font:{size:9},maxTicksLimit:10},grid:{color:'#45475a'}},
-      y:{min:0,ticks:{color:'#585b70',font:{size:9}},grid:{color:'#45475a'}}
+    ]},
+    options:{animation:false,responsive:true,maintainAspectRatio:true,
+      plugins:{legend:{display:false}},
+      scales:{
+        x:{ticks:{color:'#585b70',font:{size:9},maxTicksLimit:10},grid:{color:'#45475a'}},
+        y:{min:0,ticks:{color:'#585b70',font:{size:9}},grid:{color:'#45475a'}}
+      }
     }
-  }
-});
+  });
+}
 
 function _updateChart(history, threshold){
+  _ensureChart();
+  if(!_scoreChart) return;
   const n = history.length;
   _scoreChart.data.labels = Array.from({length:n},(_,i)=>i-n+1);
   _scoreChart.data.datasets[0].data = history;
@@ -631,7 +633,7 @@ if __name__ == "__main__":
     t = threading.Thread(target=_scan_loop, daemon=True)
     t.start()
 
-    print(f"\n  Dashboard → http://localhost:5000")
-    print(f"  On network → http://{ip}:5000\n")
-    threading.Timer(1.0, lambda: webbrowser.open("http://localhost:5000")).start()
+    print(f"\n  Dashboard -> http://127.0.0.1:5000")
+    print(f"  On network -> http://{ip}:5000\n")
+    threading.Timer(1.0, lambda: webbrowser.open("http://127.0.0.1:5000")).start()
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)

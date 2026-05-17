@@ -303,55 +303,59 @@ class App(tk.Tk):
         """Background thread: scan networks, update detectors, handle recording/classification."""
         while self._running:
             start = time.monotonic()
-            nets = scan_networks()
+            try:
+                nets = scan_networks()
 
-            with self._lock:
-                self._networks = nets
-                for ssid in nets:
-                    if ssid not in self._detectors:
-                        self._detectors[ssid] = MotionDetector(threshold=self._threshold_var.get(), name=ssid)
+                with self._lock:
+                    self._networks = nets
+                    for ssid in nets:
+                        if ssid not in self._detectors:
+                            self._detectors[ssid] = MotionDetector(threshold=self._threshold_var.get(), name=ssid)
 
-                # Update motion detectors
-                scored_pairs: list[tuple[str, float, float]] = []  # (key, score, weight)
-                for ssid, rssi in nets.items():
-                    det = self._detectors[ssid]
-                    det.update(rssi)
-                    self._net_scores[ssid] = det.score()
-                    self._net_motion[ssid] = det.is_motion()
-                    if det.calibrated:
-                        weight = max(rssi + 100.0, 1.0)  # stronger signal → more weight
-                        scored_pairs.append((ssid, det.score(), weight))
-                active = [(s, w) for k, s, w in scored_pairs
-                          if self._focused_ssid is None or k == self._focused_ssid]
-                if active:
-                    total_w = sum(w for _, w in active)
-                    fused = sum(s * w for s, w in active) / total_w
-                    self._score_history.append(fused)
+                    # Update motion detectors
+                    scored_pairs: list[tuple[str, float, float]] = []  # (key, score, weight)
+                    for ssid, rssi in nets.items():
+                        det = self._detectors[ssid]
+                        det.update(rssi)
+                        self._net_scores[ssid] = det.score()
+                        self._net_motion[ssid] = det.is_motion()
+                        if det.calibrated:
+                            weight = max(rssi + 100.0, 1.0)  # stronger signal → more weight
+                            scored_pairs.append((ssid, det.score(), weight))
+                    active = [(s, w) for k, s, w in scored_pairs
+                              if self._focused_ssid is None or k == self._focused_ssid]
+                    if active:
+                        total_w = sum(w for _, w in active)
+                        fused = sum(s * w for s, w in active) / total_w
+                        self._score_history.append(fused)
 
-                # Prune uncalibrated detectors absent for too long
-                for key in list(self._detectors.keys()):
-                    if key in nets:
-                        self._net_absent[key] = 0
+                    # Prune uncalibrated detectors absent for too long
+                    for key in list(self._detectors.keys()):
+                        if key in nets:
+                            self._net_absent[key] = 0
+                        else:
+                            self._net_absent[key] = self._net_absent.get(key, 0) + 1
+                            if (self._net_absent[key] >= STALE_ABSENT_TICKS
+                                    and not self._detectors[key].calibrated):
+                                del self._detectors[key]
+                                del self._net_absent[key]
+
+                    # Recording or classifying
+                    if self._recording:
+                        self._record_buf.append(dict(nets))
+                        self._record_remaining -= 1
+                        if self._record_remaining <= 0:
+                            self._fingerprinter.record(self._record_name, self._record_buf)
+                            self._recording = False
+                            self._rooms_dirty = True
                     else:
-                        self._net_absent[key] = self._net_absent.get(key, 0) + 1
-                        if (self._net_absent[key] >= STALE_ABSENT_TICKS
-                                and not self._detectors[key].calibrated):
-                            del self._detectors[key]
-                            del self._net_absent[key]
+                        self._location = self._fingerprinter.classify(nets)
 
-                # Recording or classifying
-                if self._recording:
-                    self._record_buf.append(dict(nets))
-                    self._record_remaining -= 1
-                    if self._record_remaining <= 0:
-                        self._fingerprinter.record(self._record_name, self._record_buf)
-                        self._recording = False
-                        self._rooms_dirty = True
-                else:
-                    self._location = self._fingerprinter.classify(nets)
-
-            elapsed = time.monotonic() - start
-            time.sleep(max(0.0, POLL_INTERVAL - elapsed))
+                elapsed = time.monotonic() - start
+                time.sleep(max(0.0, POLL_INTERVAL - elapsed))
+            except Exception:
+                logger.exception("unhandled error in scan loop — restarting iteration")
+                time.sleep(1.0)
 
     # ── UI refresh (main thread) ──────────────────────────────────────────────
 
